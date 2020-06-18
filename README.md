@@ -1,5 +1,5 @@
 ## Description
-Just my simple BERT implementations (also including ALBERT), mainly for the purpose of practicing TensorFlow 2. This code is partly incomplete, and may have some mistakes.
+Just my simple BERT implementations (also including ALBERT and ELECTRA), mainly for the purpose of practicing TensorFlow 2. This code is partly incomplete, and may have some mistakes.
 ## References
 https://tensorflow.google.cn/tutorials  
 https://github.com/google-research/bert  

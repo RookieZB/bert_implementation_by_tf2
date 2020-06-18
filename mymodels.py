@@ -199,18 +199,19 @@ class BERT(keras.layers.Layer):
                 '/intermediate/dense',
                 '/output/dense',
                 '/output/LayerNorm']
+            self.embsize = self.param.get('embedding_size', self.param['hidden_size'])
             self.embedding = Embedding(
                 'bert/embeddings' if self.model == 'bert' else 'electra/embeddings',
                 self.namee,
                 self.param['vocab_size'],
                 self.param['type_vocab_size'],
-                self.param.get('embedding_size', self.param['hidden_size']),
+                self.embsize,
                 self.param['max_position_embeddings'],
                 float(self.param['hidden_dropout_prob']))
             self.projection = keras.layers.Dense(
                 self.param['hidden_size'],
                 kernel_initializer=w_initializing(),
-                name='electra/embeddings_project') if self.model == 'electra' else None
+                name='electra/embeddings_project') if self.embsize != self.param['hidden_size'] else None
             self.encoder = [TransEncoder(
                 'bert/encoder/layer_'+str(i1) if self.model == 'bert' else 'electra/encoder/layer_'+str(i1),
                 self.namea,
