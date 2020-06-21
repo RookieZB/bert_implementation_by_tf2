@@ -4,7 +4,7 @@
 Title: My Implementation of Models by TensorFlow
 Author: Chris Chen
 Date: 2020/02/02
-Update: 2020/05/16
+Update: 2020/06/18
 
 """
 
@@ -74,8 +74,7 @@ class Attention(keras.layers.Layer):
         self.drop = keras.layers.Dropout(drop)
 
     def transposing(self, x):
-        x1 = tf.reshape(x, [-1, x.shape[1], self.head, self.size])
-        return tf.transpose(x1, [0, 2, 1, 3])
+        return tf.transpose(tf.reshape(x, [-1, x.shape[1], self.head, self.size]), [0, 2, 1, 3])
 
     def masking(self, mask):
         l1 = tf.shape(mask)
@@ -128,10 +127,8 @@ class Embedding(keras.layers.Layer):
         self.drop = keras.layers.Dropout(drop)
 
     def propagating(self, x, seg, training):
-        x1 = self.embedding(x)
-        x2 = self.segemb(seg)
         p1 = tf.slice(self.posemb, [0, 0], [x.shape[1], -1])
-        return self.drop(self.norm(x1+x2+p1), training=training)
+        return self.drop(self.norm(self.embedding(x)+self.segemb(seg)+p1), training=training)
 
 
 class Bottleneck(keras.layers.Layer):
@@ -175,7 +172,7 @@ class BERT(keras.layers.Layer):
     """The BERT model"""
     def __init__(self, config, model='bert', **kwargs):
         super(BERT, self).__init__(**kwargs)
-        self.model = model
+        self.model, self.modelname, self.cat = model.lower(), model, 0
         self.param = json.load(open(config)) if type(config) is str else config
         self.act = gelu_activating if self.param['hidden_act'] == 'gelu' else self.param['hidden_act']
         self.replacement = {
@@ -184,12 +181,11 @@ class BERT(keras.layers.Layer):
             'electra/embeddings/word_embeddings/embeddings': 'electra/embeddings/word_embeddings',
             'electra/embeddings/token_type_embeddings/embeddings': 'electra/embeddings/token_type_embeddings'}
 
-        if self.model == 'bert' or self.model == 'electra':
-            self.namee = [
-                '/word_embeddings',
-                '/token_type_embeddings',
-                '/position_embeddings',
-                '/LayerNorm']
+        if self.model in ['bert', 'roberta', 'electra'] or self.model.split('*')[0] == 'bert':
+            self.model = self.model.split('*')[1] if '*' in self.model else self.model
+            self.model = 'bert' if self.model == 'roberta' else self.model
+            self.embsize = self.param.get('embedding_size', self.param['hidden_size'])
+            self.namee = ['/word_embeddings', '/token_type_embeddings', '/position_embeddings', '/LayerNorm']
             self.namea = [
                 '/attention/self/query',
                 '/attention/self/key',
@@ -199,9 +195,8 @@ class BERT(keras.layers.Layer):
                 '/intermediate/dense',
                 '/output/dense',
                 '/output/LayerNorm']
-            self.embsize = self.param.get('embedding_size', self.param['hidden_size'])
             self.embedding = Embedding(
-                'bert/embeddings' if self.model == 'bert' else 'electra/embeddings',
+                self.model+'/embeddings',
                 self.namee,
                 self.param['vocab_size'],
                 self.param['type_vocab_size'],
@@ -211,9 +206,9 @@ class BERT(keras.layers.Layer):
             self.projection = keras.layers.Dense(
                 self.param['hidden_size'],
                 kernel_initializer=w_initializing(),
-                name='electra/embeddings_project') if self.embsize != self.param['hidden_size'] else None
+                name=self.model+'/embeddings_project') if self.embsize != self.param['hidden_size'] else None
             self.encoder = [TransEncoder(
-                'bert/encoder/layer_'+str(i1) if self.model == 'bert' else 'electra/encoder/layer_'+str(i1),
+                self.model+'/encoder/layer_'+str(i1),
                 self.namea,
                 self.param['num_attention_heads'],
                 int(self.param['hidden_size']/self.param['num_attention_heads']),
@@ -222,12 +217,9 @@ class BERT(keras.layers.Layer):
                 float(self.param['hidden_dropout_prob']),
                 self.act) for i1 in range(self.param['num_hidden_layers'])]
 
-        elif self.model == 'albert':
-            self.namee = [
-                '/word_embeddings',
-                '/token_type_embeddings',
-                '/position_embeddings',
-                '/LayerNorm']
+        elif self.model in ['albert']:
+            self.cat = 1
+            self.namee = ['/word_embeddings', '/token_type_embeddings', '/position_embeddings', '/LayerNorm']
             self.namea = [
                 '/attention_1/self/query',
                 '/attention_1/self/key',
@@ -264,17 +256,16 @@ class BERT(keras.layers.Layer):
 
     def loading(self, ckpt):
         _ = self.propagating(tf.ones((2, 2)), tf.zeros((2, 2)), tf.zeros((2, 2)), False, False)
-        tens1 = self.weights
         name1 = [i1.name[:-2] for i1 in self.weights]
         name1 = [i1 if i1 not in self.replacement.keys() else self.replacement[i1] for i1 in name1]
         valu1 = [tf.train.load_variable(ckpt, i1) for i1 in name1]
-        keras.backend.batch_set_value(zip(tens1, valu1))
+        keras.backend.batch_set_value(zip(self.weights, valu1))
 
     def propagating(self, x, seg=None, mask=None, cls=False, training=False):
         x1 = self.embedding.propagating(x, seg, training)
         x1 = self.projection(x1) if self.projection is not None else x1
 
-        if self.model == 'albert':
+        if self.cat == 1:
             for i1 in range(self.param['num_hidden_layers']):
                 x1 = self.encoder[0].propagating(x1, training, mask)
 
@@ -323,11 +314,10 @@ class MobileNet(keras.layers.Layer):
 
     def loading(self, ckpt):
         _ = self.propagating(tf.ones((2, 224, 224, 3)))
-        tens1 = self.weights
         name1 = [i1.name[:-2] for i1 in self.weights]
         name1 = [i1.replace('kernel', 'weights').replace('bias', 'biases') for i1 in name1]
         valu1 = [tf.train.load_variable(ckpt, i1) for i1 in name1]
-        keras.backend.batch_set_value(zip(tens1, valu1))
+        keras.backend.batch_set_value(zip(self.weights, valu1))
 
     def propagating(self, x, training=False):
         x1 = self.act(self.norm1(self.conv1(x), training=training))
@@ -337,8 +327,7 @@ class MobileNet(keras.layers.Layer):
 
         x1 = self.act(self.norm2(self.conv2(x1), training=training))
         x1 = tf.reshape(self.pool(x1), (-1, 1, 1, x1.shape[-1]))
-        x1 = self.act(self.conv3(x1))
-        return tf.nn.softmax(self.conv4(x1))
+        return tf.nn.softmax(self.conv4(self.act(self.conv3(x1))))
 
 
 """Training optimizers"""
@@ -346,10 +335,9 @@ class MobileNet(keras.layers.Layer):
 
 class AdamW(keras.optimizers.Optimizer):
     """The AdamW optimizer"""
-    def __init__(self, step, lrate=1e-3, drate=1e-2, b1=0.9, b2=0.999, lmode=0, ldecay=None, name='AdamW', **kwargs):
+    def __init__(self, step, lrate=1e-3, b1=0.9, b2=0.999, drate=1e-2, lmode=0, ldecay=None, name='AdamW', **kwargs):
         super(AdamW, self).__init__(name, **kwargs)
-        self.lmode, self.step, self.drate, self.epsilon = lmode, step, drate, 1e-6
-        self.ldecay = ldecay
+        self.step, self.drate, self.lmode, self.ldecay, self.epsilon = step, drate, lmode, ldecay, 1e-6
         self.spec = ['LayerNorm', 'bias']
         self._set_hyper('learning_rate', lrate)
         self._set_hyper('beta_1', b1)
@@ -374,12 +362,10 @@ class AdamW(keras.optimizers.Optimizer):
             return tf.where(s1 < warm1, r1*s1/warm1, r1*(self.step-s1)/(self.step-warm1))
 
     def _resource_apply_base(self, grad, var, indices=None):
-        t1 = var.dtype.base_dtype
-        name1 = var.name
-        r1 = self._decayed_lr(t1)
-        e1 = tf.convert_to_tensor(self.epsilon, t1)
         m1 = self.get_slot(var, 'm')
         v1 = self.get_slot(var, 'v')
+        t1 = var.dtype.base_dtype
+        e1 = tf.convert_to_tensor(self.epsilon, t1)
         beta1 = tf.identity(self._get_hyper('beta_1', t1))
         beta2 = tf.identity(self._get_hyper('beta_2', t1))
         spec1 = False
@@ -396,7 +382,7 @@ class AdamW(keras.optimizers.Optimizer):
                 v2 = self._resource_scatter_add(v1, indices, (1.0-beta2)*grad*grad)
 
         for item1 in self.spec:
-            if item1 in name1:
+            if item1 in var.name:
                 spec1 = True
                 break
 
@@ -410,11 +396,11 @@ class AdamW(keras.optimizers.Optimizer):
 
         if self.lmode == 2 and not spec1:
             for item2 in self.ldecay.keys():
-                if item2 in name1:
+                if item2 in var.name:
                     rati1 = self.ldecay[item2]
                     break
 
-        return tf.group(*[var.assign_sub(rati1*r1*u1, self._use_locking), m2, v2])
+        return tf.group(*[var.assign_sub(rati1*self._decayed_lr(t1)*u1, self._use_locking), m2, v2])
 
     def _resource_apply_dense(self, grad, var, **kwargs):
         return self._resource_apply_base(grad, var)
@@ -459,8 +445,7 @@ class MovingAverage(object):
 class Tokenizer:
     """The Chinese tokenizer"""
     def __init__(self):
-        self.vocab = {}
-        self.character = [
+        self.vocab, self.character = {}, [
             [0x4E00, 0x9FFF], [0x3400, 0x4DBF], [0x20000, 0x2A6DF], [0x2A700, 0x2B73F], [0x2B740, 0x2B81F],
             [0x2B820, 0x2CEAF], [0xF900, 0xFAFF], [0x2F800, 0x2FA1F]]
 
@@ -487,12 +472,12 @@ class Tokenizer:
     def encoding(self, a, b=None, maxlen=128):
         a1 = ['[CLS]']+self.separating(a)+['[SEP]']
         b1 = self.separating(b)+['[SEP]'] if b is not None else []
+        sent1 = (a1+b1)[:maxlen]
         segm1 = ([0]*len(a1)+[1]*len(b1))[:maxlen]
-        a1 = (a1+b1)[:maxlen]
+        mask1 = [0]*len(sent1)+[1]*(maxlen-len(sent1))
+        sent1 = sent1+['[PAD]']*(maxlen-len(sent1))
         segm1 = segm1+[segm1[-1]]*(maxlen-len(segm1))
-        mask1 = [0]*len(a1)+[1]*(maxlen-len(a1))
-        a1 = a1+['[PAD]']*(maxlen-len(a1))
-        return [self.vocab.get(i1, self.vocab['[UNK]']) for i1 in a1], segm1, mask1
+        return [self.vocab.get(i1, self.vocab['[UNK]']) for i1 in sent1], segm1, mask1
 
 
 """Model tests"""
@@ -504,8 +489,9 @@ def bert_testing():
     toke1.loading('./models/roberta_base_ch/vocab.txt')
     bert1 = BERT('./models/roberta_base_ch/bert_config.json', 'bert')
     bert1.loading('./models/roberta_base_ch/bert_model.ckpt')
-    text1, segm1, mask1 = toke1.encoding('我是头猪。', None, 64)
-    print(bert1.propagating(tf.constant([text1]), tf.constant([segm1]), tf.constant([mask1]))[:, :7, :])
+    sent1 = '我是头猪。'
+    text1, segm1, mask1 = toke1.encoding(sent1, None, 64)
+    print(bert1.propagating(tf.constant([text1]), tf.constant([segm1]), tf.constant([mask1]))[:, :len(sent1)+2, :])
 
 
 def mobile_testing():
