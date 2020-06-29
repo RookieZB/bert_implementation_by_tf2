@@ -170,7 +170,7 @@ class Bottleneck(keras.layers.Layer):
 
 class BERT(keras.layers.Layer):
     """The BERT model"""
-    def __init__(self, config, model='bert', **kwargs):
+    def __init__(self, config, model, **kwargs):
         super(BERT, self).__init__(**kwargs)
         self.model, self.modelname, self.cat = model.lower(), model, 0
         self.param = json.load(open(config)) if type(config) is str else config
@@ -255,13 +255,13 @@ class BERT(keras.layers.Layer):
             raise Exception('Unrecognized model "{}".'.format(self.model))
 
     def loading(self, ckpt):
-        _ = self.propagating(tf.ones((2, 2)), tf.zeros((2, 2)), tf.zeros((2, 2)), False, False)
+        _ = self.propagating(tf.ones((2, 2)), tf.zeros((2, 2)), tf.zeros((2, 2)))
         name1 = [i1.name[:-2] for i1 in self.weights]
         name1 = [i1 if i1 not in self.replacement.keys() else self.replacement[i1] for i1 in name1]
         valu1 = [tf.train.load_variable(ckpt, i1) for i1 in name1]
         keras.backend.batch_set_value(zip(self.weights, valu1))
 
-    def propagating(self, x, seg=None, mask=None, cls=False, training=False):
+    def propagating(self, x, seg, mask, cls=False, training=False):
         x1 = self.embedding.propagating(x, seg, training)
         x1 = self.projection(x1) if self.projection is not None else x1
 
@@ -274,6 +274,35 @@ class BERT(keras.layers.Layer):
                 x1 = self.encoder[i1].propagating(x1, training, mask)
 
         return tf.reshape(x1[:, 0, :], [-1, self.param['hidden_size']]) if cls else x1
+
+
+class MLM(keras.layers.Layer):
+    """The MLM model"""
+    def __init__(self, config, model, lname=None, **kwargs):
+        super(MLM, self).__init__(**kwargs)
+        self.lname = 'cls/predictions' if lname is None else lname
+        self.param = json.load(open(config)) if type(config) is str else config
+        self.vocsize = self.param['vocab_size']
+        self.emb = self.param.get('embedding_size', self.param['hidden_size'])
+        self.act = gelu_activating if self.param['hidden_act'] == 'gelu' else self.param['hidden_act']
+        self.bert = BERT(config, model)
+        self.dense = keras.layers.Dense(self.emb, self.act, True, w_initializing(), name=self.lname+'/transform/dense')
+        self.norm = keras.layers.LayerNormalization(-1, 1e-6, name=self.lname+'/transform/LayerNorm')
+        self.outbias = self.add_weight(self.lname+'/output_bias', self.vocsize, initializer=tf.zeros_initializer())
+        self.replacement = self.bert.replacement
+
+    def loading(self, ckpt):
+        _ = self.propagating(tf.ones((2, 2)), tf.zeros((2, 2)), tf.zeros((2, 2)))
+        name1 = [i1.name[:-2] for i1 in self.weights]
+        name1 = [i1 if i1 not in self.replacement.keys() else self.replacement[i1] for i1 in name1]
+        valu1 = [tf.train.load_variable(ckpt, i1) for i1 in name1]
+        keras.backend.batch_set_value(zip(self.weights, valu1))
+
+    def propagating(self, x, seg, mask, training=False):
+        x1 = self.bert.propagating(x, seg, mask, False, training)
+        x1 = self.norm(self.dense(x1))
+        x1 = tf.nn.bias_add(tf.matmul(x1, self.bert.embedding.embedding.embeddings, transpose_b=True), self.outbias)
+        return tf.nn.softmax(x1)
 
 
 class MobileNet(keras.layers.Layer):
@@ -483,20 +512,21 @@ class Tokenizer:
 """Model tests"""
 
 
-def bert_testing():
+def bert_testing(sentence=None):
     """The test of BERT"""
     toke1 = Tokenizer()
     toke1.loading('./models/roberta_base_ch/vocab.txt')
-    bert1 = BERT('./models/roberta_base_ch/bert_config.json', 'bert')
+    bert1 = BERT('./models/roberta_base_ch/bert_config.json', 'roberta')
     bert1.loading('./models/roberta_base_ch/bert_model.ckpt')
-    sent1 = '我是头猪。'
+    sent1 = '我是头猪。' if sentence is None else sentence
     text1, segm1, mask1 = toke1.encoding(sent1, None, 64)
-    print(bert1.propagating(tf.constant([text1]), tf.constant([segm1]), tf.constant([mask1]))[:, :len(sent1)+2, :])
+    print(bert1.propagating(np.array([text1]), np.array([segm1]), np.array([mask1]))[:, :len(sent1)+2, :])
 
 
-def mobile_testing():
+def mobile_testing(image=None):
     """The test of MobileNet"""
-    imag1 = tf.image.decode_jpeg(tf.io.read_file('./models/v3_small_float/panda.jpg'), channels=3)
+    file1 = './models/v3_small_float/panda.jpg' if image is None else image
+    imag1 = tf.image.decode_jpeg(tf.io.read_file(file1), channels=3)
     imag1 = tf.expand_dims(tf.image.resize(tf.cast(imag1, tf.float32)/128.-1., [224, 224]), 0)
     mnet1 = MobileNet(1, -1, 1001)
     mnet1.loading('./models/v3_small_float/model-388500')
