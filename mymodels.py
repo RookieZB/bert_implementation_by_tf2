@@ -512,15 +512,19 @@ class Tokenizer:
 """Model tests"""
 
 
-def bert_testing(sentence=None):
+def bert_testing(sentence=None, mlm=False):
     """The test of BERT"""
+    sent1 = '感觉[MASK]就像一只猪。' if sentence is None else sentence
     toke1 = Tokenizer()
-    toke1.loading('./models/roberta_base_ch/vocab.txt')
-    bert1 = BERT('./models/roberta_base_ch/bert_config.json', 'roberta')
-    bert1.loading('./models/roberta_base_ch/bert_model.ckpt')
-    sent1 = '我是头猪。' if sentence is None else sentence
+    toke1.loading('./models/bert_base_ch/vocab.txt')
+    voca1 = list(toke1.vocab.keys())
+    base1 = MLM if mlm else BERT
+    bert1 = base1('./models/bert_base_ch/bert_config.json', 'bert')
+    bert1.loading('./models/bert_base_ch/bert_model.ckpt')
     text1, segm1, mask1 = toke1.encoding(sent1, None, 64)
-    print(bert1.propagating(np.array([text1]), np.array([segm1]), np.array([mask1]))[:, :len(sent1)+2, :])
+    pred1 = bert1.propagating(np.array([text1]), np.array([segm1]), np.array([mask1]))
+    pred1 = np.array(np.argmax(pred1, axis=-1)[0]) if mlm else pred1[:, :text1.index(0), :]
+    print(''.join([voca1[pred1[i1]] for i1 in range(1, text1.index(0)-1)]) if mlm else pred1)
 
 
 def mobile_testing(image=None):
