@@ -10,6 +10,7 @@ Update: 2020/06/18
 
 import os
 import warnings
+import unicodedata
 import json
 import numpy as np
 import tensorflow as tf
@@ -380,15 +381,15 @@ class AdamW(keras.optimizers.Optimizer):
             self.add_slot(var, 'm')
             self.add_slot(var, 'v')
 
+    @staticmethod
+    def _rate_sch(rate, step, total, lmode):
+        warm1 = total*0.1
+        return tf.where(step < warm1, rate*step/warm1, rate*(total-step)/(total-warm1)) if lmode != 1 else rate
+
     def _decayed_lr(self, var_dtype):
         r1 = self._get_hyper('learning_rate', var_dtype)
-
-        if self.lmode == 1:
-            return r1
-        else:
-            s1 = tf.cast(self.iterations, var_dtype)
-            warm1 = tf.cast(int(self.step*0.1), var_dtype)
-            return tf.where(s1 < warm1, r1*s1/warm1, r1*(self.step-s1)/(self.step-warm1))
+        s1 = tf.cast(self.iterations, var_dtype)
+        return self._rate_sch(r1, s1, self.step, self.lmode)
 
     def _resource_apply_base(self, grad, var, indices=None):
         m1 = self.get_slot(var, 'm')
@@ -472,11 +473,11 @@ class MovingAverage(object):
 
 
 class Tokenizer:
-    """The Chinese tokenizer"""
+    """The text tokenizer"""
     def __init__(self):
         self.vocab, self.character = {}, [
             [0x4E00, 0x9FFF], [0x3400, 0x4DBF], [0x20000, 0x2A6DF], [0x2A700, 0x2B73F], [0x2B740, 0x2B81F],
-            [0x2B820, 0x2CEAF], [0xF900, 0xFAFF], [0x2F800, 0x2FA1F]]
+            [0x2B820, 0x2CEAF], [0xF900, 0xFAFF], [0x2F800, 0x2FA1F], [33, 64], [91, 96], [123, 126]]
 
     def loading(self, path, encoding='utf-8'):
         with open(path, encoding=encoding) as f1:
@@ -484,19 +485,18 @@ class Tokenizer:
                 self.vocab[j1.strip()] = i1
 
     def separating(self, text):
-        text1 = []
-        char1 = False
+        text1, char1 = [], False
 
-        for c1 in text:
+        for c1 in text.lower():
             for i1 in self.character:
-                if i1[0] <= ord(c1) <= i1[1]:
+                if i1[0] <= ord(c1) <= i1[1] or unicodedata.category(c1).startswith('P'):
                     char1 = True
                     break
 
             text1 = text1+[' ', c1, ' '] if char1 else text1+[c1]
             char1 = False
 
-        return ''.join(text1).strip().split()
+        return ''.join(text1).replace('[ mask ]', '[MASK]').strip().split()
 
     def encoding(self, a, b=None, maxlen=128):
         a1 = ['[CLS]']+self.separating(a)+['[SEP]']
