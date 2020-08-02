@@ -4,7 +4,7 @@
 Title: My Implementation of Models by TensorFlow
 Author: Chris Chen
 Date: 2020/02/02
-Update: 2020/06/18
+Update: 2020/07/31
 
 """
 
@@ -15,6 +15,7 @@ import json
 import numpy as np
 import tensorflow as tf
 import tensorflow.keras as keras
+import tensorflow.python as ops
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 warnings.filterwarnings('ignore')
@@ -30,7 +31,7 @@ def w_initializing(param=0.02):
 
 def gelu_activating(x):
     """GELU activation function"""
-    return 0.5*x*(1.0+tf.tanh((np.sqrt(2/np.pi)*(x+0.044715*tf.pow(x, 3)))))
+    return 0.5*x*(1.0+tf.math.erf(x/tf.math.sqrt(2.0)))
 
 
 def hswish_activating(x):
@@ -78,25 +79,21 @@ class Attention(keras.layers.Layer):
         return tf.transpose(tf.reshape(x, [-1, x.shape[1], self.head, self.size]), [0, 2, 1, 3])
 
     def masking(self, mask):
-        l1 = tf.shape(mask)
-        m1 = tf.cast(tf.reshape(mask, [-1, 1, l1[1]]), tf.float32)
-        m2 = tf.ones((l1[0], l1[1], 1), tf.float32)
-        return tf.expand_dims(m2*m1, axis=[1])*self.ninf
+        return tf.cast(mask[:, tf.newaxis, tf.newaxis, :], tf.float32)*self.ninf
 
     def calculating(self, q, k, v, training, mask):
         atte1 = tf.matmul(q, k, transpose_b=True)/tf.math.sqrt(tf.cast(self.size, tf.float32))
         atte1 = atte1+self.masking(mask) if mask is not None else atte1
-        atte1 = self.attdrop(tf.nn.softmax(atte1, axis=-1), training=training)
-        return tf.matmul(atte1, v), atte1
+        return tf.matmul(self.attdrop(tf.nn.softmax(atte1, axis=-1), training=training), v)
 
     def propagating(self, x, training, mask):
         q1 = self.transposing(self.wq(x))
         k1 = self.transposing(self.wk(x))
         v1 = self.transposing(self.wv(x))
-        x1, a1 = self.calculating(q1, k1, v1, training, mask)
+        x1 = self.calculating(q1, k1, v1, training, mask)
         x1 = tf.transpose(x1, [0, 2, 1, 3])
         x1 = tf.reshape(x1, [-1, x1.shape[1], self.head*self.size])
-        return self.norm(x+self.drop(self.dense(x1), training=training)), a1
+        return self.norm(x+self.drop(self.dense(x1), training=training))
 
 
 class TransEncoder(keras.layers.Layer):
@@ -111,7 +108,7 @@ class TransEncoder(keras.layers.Layer):
         self.dense2 = keras.layers.Dense(self.dff, act, True, w_initializing(), name=bname+lname[5])
 
     def propagating(self, x, training, mask):
-        x1, a1 = self.att.propagating(x, training, mask)
+        x1 = self.att.propagating(x, training, mask)
         x2 = self.dense1(self.dense2(x1))
         return self.norm(x1+self.drop(x2, training=training))
 
@@ -187,9 +184,10 @@ class BERT(keras.layers.Layer):
         if self.mode not in ['cls', 'seq', 'mlm']:
             raise Exception('Unrecognized mode "{}".'.format(self.mode))
 
-        if self.model in ['bert', 'roberta', 'electra'] or self.model.split('*')[0] == 'bert':
-            self.model = self.model.split('*')[1] if '*' in self.model else self.model
-            self.model = 'bert' if self.model == 'roberta' else self.model
+        if self.model in ['bert', 'albert', 'electra', 'roberta'] or self.model.split('*')[0] in ['bert', 'albert']:
+            self.cat = 1 if self.model.split('*')[0] == 'albert' else 0
+            self.hd = 'bert' if self.model in ['albert', 'roberta'] else self.model.split('*')[-1]
+            self.namep = self.hd+'/encoder/embedding_hidden_mapping_in' if self.cat else self.hd+'/embeddings_project'
             self.namee = ['/word_embeddings', '/token_type_embeddings', '/position_embeddings', '/LayerNorm']
             self.namea = [
                 '/attention/self/query',
@@ -200,42 +198,7 @@ class BERT(keras.layers.Layer):
                 '/intermediate/dense',
                 '/output/dense',
                 '/output/LayerNorm']
-            self.namel = [
-                'cls/predictions/transform/dense',
-                'cls/predictions/transform/LayerNorm',
-                'cls/predictions/output_bias']
-            self.embedding = Embedding(
-                self.model+'/embeddings',
-                self.namee,
-                self.param['vocab_size'],
-                self.param['type_vocab_size'],
-                self.embsize,
-                self.param['max_position_embeddings'],
-                float(self.param['hidden_dropout_prob']))
-            self.projection = keras.layers.Dense(
-                self.param['hidden_size'],
-                kernel_initializer=w_initializing(),
-                name=self.model+'/embeddings_project') if self.embsize != self.param['hidden_size'] else None
-            self.encoder = [TransEncoder(
-                self.model+'/encoder/layer_'+str(i1),
-                self.namea,
-                self.param['num_attention_heads'],
-                int(self.param['hidden_size']/self.param['num_attention_heads']),
-                self.param['intermediate_size'],
-                float(self.param['attention_probs_dropout_prob']),
-                float(self.param['hidden_dropout_prob']),
-                self.act) for i1 in range(self.param['num_hidden_layers'])]
-
-            if self.mode == 'mlm':
-                self.dense = keras.layers.Dense(self.embsize, self.act, True, w_initializing(), name=self.namel[0])
-                self.norm = keras.layers.LayerNormalization(-1, 1e-6, name=self.namel[1])
-                self.outbias = self.add_weight(self.namel[2], self.vocsize, initializer=tf.zeros_initializer())
-
-        elif self.model in ['albert'] or self.model.split('*')[0] == 'albert':
-            self.model = self.model.split('*')[1] if '*' in self.model else self.model
-            self.cat = 1
-            self.namee = ['/word_embeddings', '/token_type_embeddings', '/position_embeddings', '/LayerNorm']
-            self.namea = [
+            self.nameb = [
                 '/attention_1/self/query',
                 '/attention_1/self/key',
                 '/attention_1/self/value',
@@ -249,7 +212,7 @@ class BERT(keras.layers.Layer):
                 'cls/predictions/transform/LayerNorm',
                 'cls/predictions/output_bias']
             self.embedding = Embedding(
-                'bert/embeddings',
+                self.hd+'/embeddings',
                 self.namee,
                 self.param['vocab_size'],
                 self.param['type_vocab_size'],
@@ -259,16 +222,16 @@ class BERT(keras.layers.Layer):
             self.projection = keras.layers.Dense(
                 self.param['hidden_size'],
                 kernel_initializer=w_initializing(),
-                name='bert/encoder/embedding_hidden_mapping_in')
+                name=self.namep) if self.embsize != self.param['hidden_size'] else None
             self.encoder = [TransEncoder(
-                'bert/encoder/transformer/group_0/inner_group_0',
-                self.namea,
+                self.hd+'/encoder/transformer/group_0/inner_group_0' if self.cat else self.hd+'/encoder/layer_'+str(i1),
+                self.nameb if self.cat else self.namea,
                 self.param['num_attention_heads'],
                 int(self.param['hidden_size']/self.param['num_attention_heads']),
                 self.param['intermediate_size'],
                 float(self.param['attention_probs_dropout_prob']),
                 float(self.param['hidden_dropout_prob']),
-                self.act)]
+                self.act) for i1 in range(1 if self.cat else self.param['num_hidden_layers'])]
 
             if self.mode == 'mlm':
                 self.dense = keras.layers.Dense(self.embsize, self.act, True, w_initializing(), name=self.namel[0])
@@ -378,37 +341,44 @@ class AdamW(keras.optimizers.Optimizer):
         warm1 = total*0.1
         return tf.where(step < warm1, rate*step/warm1, rate*(total-step)/(total-warm1)) if lmode != 1 else rate
 
-    def _decayed_lr(self, var_dtype):
-        r1 = self._get_hyper('learning_rate', var_dtype)
-        s1 = tf.cast(self.iterations, var_dtype)
-        return self._rate_sch(r1, s1, self.step, self.lmode)
+    def _prepare_local(self, var_device, var_dtype, apply_state):
+        super(AdamW, self)._prepare_local(var_device, var_dtype, apply_state)
+        step1 = tf.cast(self.iterations+1, var_dtype)
+        beta1 = tf.identity(self._get_hyper('beta_1', var_dtype))
+        beta2 = tf.identity(self._get_hyper('beta_2', var_dtype))
+        rate1 = self._rate_sch(apply_state[(var_device, var_dtype)]['lr_t'], step1, self.step+1, self.lmode)
+        apply_state[(var_device, var_dtype)].update(dict(
+            lr=rate1,
+            epsilon=tf.convert_to_tensor(self.epsilon, var_dtype),
+            beta_1=beta1,
+            beta_1_minus=1-beta1,
+            beta_2=beta2,
+            beta_2_minus=1-beta2))
 
-    def _resource_apply_base(self, grad, var, indices=None):
+    def _resource_apply_base(self, grad, var, indices=None, apply_state=None):
         m1 = self.get_slot(var, 'm')
         v1 = self.get_slot(var, 'v')
-        t1 = var.dtype.base_dtype
-        e1 = tf.convert_to_tensor(self.epsilon, t1)
-        beta1 = tf.identity(self._get_hyper('beta_1', t1))
-        beta2 = tf.identity(self._get_hyper('beta_2', t1))
         spec1 = False
+        coef1 = ((apply_state or {}).get((var.device, var.dtype.base_dtype)) or self._fallback_apply_state(
+            var.device, var.dtype.base_dtype))
 
         if indices is None:
-            m2 = m1.assign(beta1*m1+(1.0-beta1)*grad, self._use_locking)
-            v2 = v1.assign(beta2*v1+(1.0-beta2)*grad*grad, self._use_locking)
+            m2 = m1.assign(coef1['beta_1']*m1+coef1['beta_1_minus']*grad, self._use_locking)
+            v2 = v1.assign(coef1['beta_2']*v1+coef1['beta_2_minus']*grad*grad, self._use_locking)
         else:
-            m2 = m1.assign(beta1*m1, self._use_locking)
-            v2 = v1.assign(beta2*v1, self._use_locking)
+            m2 = m1.assign(coef1['beta_1']*m1, self._use_locking)
+            v2 = v1.assign(coef1['beta_2']*v1, self._use_locking)
 
             with tf.control_dependencies([m2, v2]):
-                m2 = self._resource_scatter_add(m1, indices, (1.0-beta1)*grad)
-                v2 = self._resource_scatter_add(v1, indices, (1.0-beta2)*grad*grad)
+                m2 = self._resource_scatter_add(m1, indices, coef1['beta_1_minus']*grad)
+                v2 = self._resource_scatter_add(v1, indices, coef1['beta_2_minus']*grad*grad)
 
         for item1 in self.spec:
             if item1 in var.name:
                 spec1 = True
                 break
 
-        u1 = m2/(tf.sqrt(v2)+e1) if spec1 else m2/(tf.sqrt(v2)+e1)+self.drate*var
+        u1 = m2/(tf.sqrt(v2)+coef1['epsilon']) if spec1 else m2/(tf.sqrt(v2)+coef1['epsilon'])+self.drate*var
         rati1 = 1.0
 
         if self.lmode == 1 and not spec1:
@@ -422,13 +392,13 @@ class AdamW(keras.optimizers.Optimizer):
                     rati1 = self.ldecay[item2]
                     break
 
-        return tf.group(*[var.assign_sub(rati1*self._decayed_lr(t1)*u1, self._use_locking), m2, v2])
+        return tf.group(*[var.assign_sub(rati1*coef1['lr']*u1, self._use_locking), m2, v2])
 
-    def _resource_apply_dense(self, grad, var, **kwargs):
-        return self._resource_apply_base(grad, var)
+    def _resource_apply_dense(self, grad, var, apply_state=None, **kwargs):
+        return self._resource_apply_base(grad, var, None, apply_state)
 
-    def _resource_apply_sparse(self, grad, var, indices, **kwargs):
-        return self._resource_apply_base(grad, var, indices)
+    def _resource_apply_sparse(self, grad, var, indices, apply_state=None, **kwargs):
+        return self._resource_apply_base(grad, var, indices, apply_state)
 
     def get_config(self):
         conf1 = super(AdamW, self).get_config()
@@ -438,10 +408,76 @@ class AdamW(keras.optimizers.Optimizer):
             'beta_2': self._serialize_hyperparameter('beta_2'),
             'decaying_rate': self.drate,
             'epsilon': self.epsilon,
-            'step': self.step,
-            'layer_mode': self.lmode,
-            'layer_decay': self.ldecay,
-            'special_var': self.spec})
+            'step': self.step})
+        return conf1
+
+
+class AdamWV2(keras.optimizers.Adam):
+    """AdamW optimizer V2"""
+    def __init__(self, step, lrate=1e-3, b1=0.9, b2=0.999, drate=1e-2, name='AdamW', **kwargs):
+        super(AdamWV2, self).__init__(lrate, b1, b2, name=name, **kwargs)
+        self.step, self.drate = step, drate
+        self.spec = ['LayerNorm', 'bias']
+
+    @staticmethod
+    def _rate_sch(rate, step, total):
+        warm1 = total*0.1
+        return tf.where(step < warm1, rate*step/warm1, rate*(total-step)/(total-warm1))
+
+    def _prepare_local(self, var_device, var_dtype, apply_state):
+        super(AdamWV2, self)._prepare_local(var_device, var_dtype, apply_state)
+        step1 = tf.cast(self.iterations+1, var_dtype)
+        rate1 = self._rate_sch(apply_state[(var_device, var_dtype)]['lr_t'], step1, self.step+1)
+        apply_state[(var_device, var_dtype)].update(dict(lr=rate1))
+
+    def _resource_apply_base(self, grad, var, indices=None, apply_state=None):
+        m1 = self.get_slot(var, 'm')
+        v1 = self.get_slot(var, 'v')
+        spec1 = False
+        coef1 = ((apply_state or {}).get((var.device, var.dtype.base_dtype)) or self._fallback_apply_state(
+            var.device, var.dtype.base_dtype))
+
+        for item1 in self.spec:
+            if item1 in var.name:
+                spec1 = True
+                break
+
+        d1 = coef1['lr']*var*self.drate
+        deca1 = tf.no_op if spec1 else var.assign_sub(d1, use_locking=self._use_locking)
+
+        if indices is None:
+            with tf.control_dependencies([deca1]):
+                return ops.training.training_ops.resource_apply_adam(
+                    var.handle,
+                    m1.handle,
+                    v1.handle,
+                    coef1['beta_1_power'],
+                    coef1['beta_2_power'],
+                    coef1['lr'],
+                    coef1['beta_1_t'],
+                    coef1['beta_2_t'],
+                    coef1['epsilon'],
+                    grad,
+                    use_locking=self._use_locking)
+
+        m2 = m1.assign(coef1['beta_1_t']*m1, self._use_locking)
+        v2 = v1.assign(coef1['beta_2_t']*v1, self._use_locking)
+
+        with tf.control_dependencies([m2, v2, deca1]):
+            m2 = self._resource_scatter_add(m1, indices, coef1['one_minus_beta_1_t']*grad)
+            v2 = self._resource_scatter_add(v1, indices, coef1['one_minus_beta_2_t']*grad*grad)
+            u1 = coef1['lr']*m2/(tf.sqrt(v2)+coef1['epsilon'])
+            return tf.group(*[var.assign_sub(u1, self._use_locking), m2, v2])
+
+    def _resource_apply_dense(self, grad, var, apply_state=None, **kwargs):
+        return self._resource_apply_base(grad, var, None, apply_state)
+
+    def _resource_apply_sparse(self, grad, var, indices, apply_state=None, **kwargs):
+        return self._resource_apply_base(grad, var, indices, apply_state)
+
+    def get_config(self):
+        conf1 = super(AdamWV2, self).get_config()
+        conf1.update({'decaying_rate': self.drate, 'step': self.step})
         return conf1
 
 
@@ -465,7 +501,7 @@ class MovingAverage(object):
 
 
 class Tokenizer:
-    """Simple text tokenizer"""
+    """Simple BERT tokenizer"""
     def __init__(self):
         self.vocab, self.character = {}, [
             [0x4E00, 0x9FFF], [0x3400, 0x4DBF], [0x20000, 0x2A6DF], [0x2A700, 0x2B73F], [0x2B740, 0x2B81F],

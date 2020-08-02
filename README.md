@@ -8,4 +8,5 @@ https://github.com/brightmart/albert_zh
 https://github.com/google-research/electra  
 https://github.com/ymcui/Chinese-ELECTRA  
 https://github.com/brightmart/roberta_zh  
+https://github.com/huggingface/transformers  
 https://github.com/bojone/bert4keras
