@@ -21,7 +21,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 warnings.filterwarnings('ignore')
 
 
-"""Calculation functions"""
+"""Functions"""
 
 
 def w_initializing(param=0.02):
@@ -44,7 +44,7 @@ def hsigmoid_activating(x):
     return tf.nn.relu6(x+3.)*0.16667
 
 
-"""Network layers"""
+"""Layers"""
 
 
 class InstanceNormalization(keras.layers.Layer):
@@ -84,16 +84,16 @@ class Attention(keras.layers.Layer):
     def calculating(self, q, k, v, training, mask):
         atte1 = tf.matmul(q, k, transpose_b=True)/tf.math.sqrt(tf.cast(self.size, tf.float32))
         atte1 = atte1+self.masking(mask) if mask is not None else atte1
-        return tf.matmul(self.attdrop(tf.nn.softmax(atte1, axis=-1), training=training), v)
+        atte1 = tf.nn.softmax(atte1, axis=-1)
+        return tf.matmul(self.attdrop(atte1, training=training), v), atte1
 
     def propagating(self, x, training, mask):
         q1 = self.transposing(self.wq(x))
         k1 = self.transposing(self.wk(x))
         v1 = self.transposing(self.wv(x))
-        x1 = self.calculating(q1, k1, v1, training, mask)
-        x1 = tf.transpose(x1, [0, 2, 1, 3])
-        x1 = tf.reshape(x1, [-1, x1.shape[1], self.head*self.size])
-        return self.norm(x+self.drop(self.dense(x1), training=training))
+        x1, a1 = self.calculating(q1, k1, v1, training, mask)
+        x1 = tf.reshape(tf.transpose(x1, [0, 2, 1, 3]), [-1, x1.shape[2], self.head*self.size])
+        return self.norm(x+self.drop(self.dense(x1), training=training)), a1
 
 
 class TransEncoder(keras.layers.Layer):
@@ -108,7 +108,7 @@ class TransEncoder(keras.layers.Layer):
         self.dense2 = keras.layers.Dense(self.dff, act, True, w_initializing(), name=bname+lname[5])
 
     def propagating(self, x, training, mask):
-        x1 = self.att.propagating(x, training, mask)
+        x1, a1 = self.att.propagating(x, training, mask)
         x2 = self.dense1(self.dense2(x1))
         return self.norm(x1+self.drop(x2, training=training))
 
@@ -125,8 +125,8 @@ class Embedding(keras.layers.Layer):
         self.drop = keras.layers.Dropout(drop)
 
     def propagating(self, x, seg, training):
-        p1 = tf.slice(self.posemb, [0, 0], [x.shape[1], -1])
-        return self.drop(self.norm(self.embedding(x)+self.segemb(seg)+p1), training=training)
+        e1 = self.embedding(x)+self.segemb(seg)+tf.slice(self.posemb, [0, 0], [x.shape[1], -1])
+        return self.drop(self.norm(e1), training=training)
 
 
 class Bottleneck(keras.layers.Layer):
@@ -163,7 +163,47 @@ class Bottleneck(keras.layers.Layer):
         return x+x1 if self.cin == self.filter and self.stride == 1 else x1
 
 
-"""Model implementations"""
+class CRF(keras.layers.Layer):
+    """Conditional random field"""
+    def __init__(self, dim, **kwargs):
+        super(CRF, self).__init__(**kwargs)
+        self.transition = self.add_weight('crf/transition', (dim, dim), None, 'glorot_uniform')
+
+    def scanning(self, _state, _inputs):
+        _state = tf.expand_dims(_state, 2)
+        tran1 = tf.expand_dims(self.transition, 0)
+        return _inputs+tf.reduce_logsumexp(_state+tran1, 1)
+
+    def normalizing(self, p, mask):
+        a1 = tf.transpose(tf.scan(self.scanning, tf.transpose(p[:, 1:, :], [1, 0, 2]), p[:, 0, :]), [1, 0, 2])
+        m1 = tf.argmin(tf.concat([mask, [[0]]*mask.shape[0]], 1), 1, tf.int32)-2
+        i1 = tf.stack([tf.range(m1.shape[0]), m1], 1)
+        return tf.reduce_logsumexp(tf.gather_nd(a1, i1), 1)
+
+    def calculating(self, y, p, mask):
+        y1 = tf.cast(y, tf.float32)*tf.expand_dims(1-tf.cast(mask, tf.float32), 2)
+        s1 = tf.reduce_sum(y1*p, [1, 2])
+        s2 = tf.reduce_sum(tf.matmul(y1[:, :-1], y1[:, 1:], True)*self.transition, [1, 2])
+        return self.normalizing(p, 1-mask)-s1-s2
+
+    def decoding(self, batch, mask):
+        tran1 = np.expand_dims(self.transition.numpy(), 0)
+        mask1 = np.argmax(np.concatenate([mask, [[1]]*mask.shape[0]], 1), 1)
+        path1 = np.zeros_like(batch)
+        stat1 = np.zeros_like(batch)
+        stat1[:, 0] = batch[:, 0]
+
+        for i1 in range(1, np.max(mask1)):
+            s1 = np.expand_dims(stat1[:, i1-1], 2)+tran1
+            stat1[:, i1] = np.max(s1, 1)+batch[:, i1]
+            path1[:, i1] = np.argmax(s1, 1)
+
+        rang1 = np.stack([np.arange(mask1.shape[0]), mask1-1]).T
+        inde1 = np.argmax(tf.gather_nd(stat1, rang1), 1)
+        return [path1[i1, :, inde1[i1]][1:rang1[i1, 1]+1].tolist()+[inde1[i1]*1.0] for i1 in range(len(inde1))]
+
+
+"""Models"""
 
 
 class BERT(keras.layers.Layer):
@@ -315,7 +355,7 @@ class MobileNet(keras.layers.Layer):
         return tf.nn.softmax(self.conv4(self.act(self.conv3(x1))))
 
 
-"""Training optimizers"""
+"""Optimizers"""
 
 
 class AdamW(keras.optimizers.Optimizer):
@@ -497,7 +537,7 @@ class MovingAverage(object):
         keras.backend.batch_set_value(zip(var, keras.backend.batch_get_value(self.var)))
 
 
-"""Model tools"""
+"""Tools"""
 
 
 class Tokenizer:
@@ -538,7 +578,7 @@ class Tokenizer:
         return [self.vocab.get(i1, self.vocab['[UNK]']) for i1 in sent1], segm1, mask1
 
 
-"""Model tests"""
+"""Tests"""
 
 
 def bert_testing(sentence=None, mlm=False):
