@@ -83,8 +83,7 @@ class Attention(keras.layers.Layer):
 
     def calculating(self, q, k, v, training, mask):
         atte1 = tf.matmul(q, k, transpose_b=True)/tf.math.sqrt(tf.cast(self.size, tf.float32))
-        atte1 = atte1+self.masking(mask) if mask is not None else atte1
-        atte1 = tf.nn.softmax(atte1, axis=-1)
+        atte1 = tf.nn.softmax(atte1+self.masking(mask) if mask is not None else atte1, axis=-1)
         return tf.matmul(self.attdrop(atte1, training=training), v), atte1
 
     def propagating(self, x, training, mask):
@@ -100,27 +99,25 @@ class TransEncoder(keras.layers.Layer):
     """Transformer encoder layer"""
     def __init__(self, bname, lname, head, size, dff, attdrop=0.1, drop=0.1, act='relu', **kwargs):
         super(TransEncoder, self).__init__(**kwargs)
-        self.dim, self.dff = int(head*size), dff
         self.att = Attention(bname, lname, head, size, attdrop, drop)
         self.norm = keras.layers.LayerNormalization(-1, 1e-6, name=bname+lname[7])
         self.drop = keras.layers.Dropout(drop)
-        self.dense1 = keras.layers.Dense(self.dim, None, True, w_initializing(), name=bname+lname[6])
-        self.dense2 = keras.layers.Dense(self.dff, act, True, w_initializing(), name=bname+lname[5])
+        self.dense1 = keras.layers.Dense(int(head*size), None, True, w_initializing(), name=bname+lname[6])
+        self.dense2 = keras.layers.Dense(dff, act, True, w_initializing(), name=bname+lname[5])
 
     def propagating(self, x, training, mask):
-        x1, a1 = self.att.propagating(x, training, mask)
-        x2 = self.dense1(self.dense2(x1))
-        return self.norm(x1+self.drop(x2, training=training))
+        x1, _ = self.att.propagating(x, training, mask)
+        x2 = self.drop(self.dense1(self.dense2(x1)), training=training)
+        return self.norm(x1+x2)
 
 
 class Embedding(keras.layers.Layer):
     """Embedding layer"""
     def __init__(self, bname, lname, voc, seg, dim, maxlen, drop=0.1, **kwargs):
         super(Embedding, self).__init__(**kwargs)
-        self.dim, self.maxlen = dim, maxlen
         self.embedding = keras.layers.Embedding(voc, dim, w_initializing(), name=bname+lname[0])
         self.segemb = keras.layers.Embedding(seg, dim, w_initializing(), name=bname+lname[1])
-        self.posemb = self.add_weight(bname+lname[2], (self.maxlen, self.dim), None, w_initializing())
+        self.posemb = self.add_weight(bname+lname[2], (maxlen, dim), None, w_initializing())
         self.norm = keras.layers.LayerNormalization(-1, 1e-6, name=bname+lname[3])
         self.drop = keras.layers.Dropout(drop)
 
@@ -133,10 +130,10 @@ class Bottleneck(keras.layers.Layer):
     """Bottleneck layer"""
     def __init__(self, lname, size, stride, cin, cout, expansion, caxis, act, squeeze=True, **kwargs):
         super(Bottleneck, self).__init__(**kwargs)
-        self.div, self.cin, self.filter, self.stride, self.caxis, self.squeeze = 8, cin, cout, stride, caxis, squeeze
+        self.div, self.cin, self.filter, self.stride, self.squeeze = 8, cin, cout, stride, squeeze
         self.exp = int(cin*expansion)
         self.factor = self.dividing(self.exp/4)
-        self.act = hswish_activating if act == 'hswish' else tf.nn.relu
+        self.act = {'hswish': hswish_activating, 'relu': tf.nn.relu}[act]
         self.conv1 = keras.layers.Conv2D(self.exp, 1, 1, 'same', use_bias=False, name=lname+'expand/')
         self.conv2 = keras.layers.DepthwiseConv2D(size, stride, 'same', use_bias=False, name=lname+'depthwise/')
         self.conv3 = keras.layers.Conv2D(cout, 1, 1, 'same', use_bias=False, name=lname+'project/')
@@ -177,8 +174,7 @@ class CRF(keras.layers.Layer):
     def normalizing(self, p, mask):
         a1 = tf.transpose(tf.scan(self.scanning, tf.transpose(p[:, 1:, :], [1, 0, 2]), p[:, 0, :]), [1, 0, 2])
         m1 = tf.argmin(tf.concat([mask, [[0]]*mask.shape[0]], 1), 1, tf.int32)-2
-        i1 = tf.stack([tf.range(m1.shape[0]), m1], 1)
-        return tf.reduce_logsumexp(tf.gather_nd(a1, i1), 1)
+        return tf.reduce_logsumexp(tf.gather_nd(a1, tf.stack([tf.range(m1.shape[0]), m1], 1)), 1)
 
     def calculating(self, y, p, mask):
         y1 = tf.cast(y, tf.float32)*tf.expand_dims(1-tf.cast(mask, tf.float32), 2)
@@ -212,9 +208,8 @@ class BERT(keras.layers.Layer):
         super(BERT, self).__init__(**kwargs)
         self.model, self.mode, self.cat = model.lower(), mode.lower(), 0
         self.param = json.load(open(config)) if type(config) is str else config
-        self.act = gelu_activating if self.param['hidden_act'] == 'gelu' else self.param['hidden_act']
         self.embsize = self.param.get('embedding_size', self.param['hidden_size'])
-        self.vocsize = self.param['vocab_size']
+        self.act = gelu_activating if self.param['hidden_act'] == 'gelu' else self.param['hidden_act']
         self.replacement = {
             'bert/embeddings/word_embeddings/embeddings': 'bert/embeddings/word_embeddings',
             'bert/embeddings/token_type_embeddings/embeddings': 'bert/embeddings/token_type_embeddings',
@@ -227,7 +222,7 @@ class BERT(keras.layers.Layer):
         if self.model in ['bert', 'albert', 'electra', 'roberta'] or self.model.split('*')[0] in ['bert', 'albert']:
             self.cat = 1 if self.model.split('*')[0] == 'albert' else 0
             self.hd = 'bert' if self.model in ['albert', 'roberta'] else self.model.split('*')[-1]
-            self.namep = self.hd+'/encoder/embedding_hidden_mapping_in' if self.cat else self.hd+'/embeddings_project'
+            self.namep = self.hd+('/encoder/embedding_hidden_mapping_in' if self.cat else '/embeddings_project')
             self.namee = ['/word_embeddings', '/token_type_embeddings', '/position_embeddings', '/LayerNorm']
             self.namea = [
                 '/attention/self/query',
@@ -264,10 +259,10 @@ class BERT(keras.layers.Layer):
                 kernel_initializer=w_initializing(),
                 name=self.namep) if self.embsize != self.param['hidden_size'] else None
             self.encoder = [TransEncoder(
-                self.hd+'/encoder/transformer/group_0/inner_group_0' if self.cat else self.hd+'/encoder/layer_'+str(i1),
+                self.hd+('/encoder/transformer/group_0/inner_group_0' if self.cat else '/encoder/layer_'+str(i1)),
                 self.nameb if self.cat else self.namea,
                 self.param['num_attention_heads'],
-                int(self.param['hidden_size']/self.param['num_attention_heads']),
+                self.param['hidden_size']//self.param['num_attention_heads'],
                 self.param['intermediate_size'],
                 float(self.param['attention_probs_dropout_prob']),
                 float(self.param['hidden_dropout_prob']),
@@ -276,15 +271,14 @@ class BERT(keras.layers.Layer):
             if self.mode == 'mlm':
                 self.dense = keras.layers.Dense(self.embsize, self.act, True, w_initializing(), name=self.namel[0])
                 self.norm = keras.layers.LayerNormalization(-1, 1e-6, name=self.namel[1])
-                self.outbias = self.add_weight(self.namel[2], self.vocsize, initializer=tf.zeros_initializer())
+                self.outbias = self.add_weight(self.namel[2], self.param['vocab_size'], initializer='zeros')
 
         else:
             raise Exception('Unrecognized model "{}".'.format(self.model))
 
     def loading(self, ckpt):
         _ = self.propagating(tf.ones((2, 2)), tf.zeros((2, 2)), tf.zeros((2, 2)))
-        name1 = [i1.name[:-2] for i1 in self.weights]
-        name1 = [i1 if i1 not in self.replacement.keys() else self.replacement[i1] for i1 in name1]
+        name1 = [self.replacement.get(i1.name[:-2], i1.name[:-2]) for i1 in self.weights]
         keras.backend.batch_set_value(zip(self.weights, [tf.train.load_variable(ckpt, i1) for i1 in name1]))
 
     def propagating(self, x, seg, mask, training=False):
@@ -294,19 +288,18 @@ class BERT(keras.layers.Layer):
         for i1 in range(self.param['num_hidden_layers']):
             x1 = self.encoder[0 if self.cat == 1 else i1].propagating(x1, training, mask)
 
-        if self.mode in ['cls', 'seq']:
-            return tf.reshape(x1[:, 0, :], [-1, self.param['hidden_size']]) if self.mode == 'cls' else x1
+        if self.mode == 'mlm':
+            x2 = self.norm(self.dense(x1))
+            x2 = tf.nn.bias_add(tf.matmul(x2, self.embedding.embedding.embeddings, transpose_b=True), self.outbias)
+            return tf.nn.softmax(x2), x1
         else:
-            x1 = self.norm(self.dense(x1))
-            x1 = tf.nn.bias_add(tf.matmul(x1, self.embedding.embedding.embeddings, transpose_b=True), self.outbias)
-            return tf.nn.softmax(x1)
+            return x1[:, 0, :] if self.mode == 'cls' else x1
 
 
 class MobileNet(keras.layers.Layer):
     """MobileNet V3 model"""
-    def __init__(self, alpha, caxis, cate, act='hswish', **kwargs):
+    def __init__(self, alpha, caxis, cate, act='hswish', param=None, **kwargs):
         super(MobileNet, self).__init__(**kwargs)
-        self.div, self.encoder = 8, []
         self.act = hswish_activating if act == 'hswish' else act
         self.conv1 = keras.layers.Conv2D(16, 3, 2, 'same', use_bias=False, name='MobilenetV3/Conv/')
         self.conv2 = keras.layers.Conv2D(576, 1, use_bias=False, name='MobilenetV3/Conv_1/')
@@ -316,32 +309,32 @@ class MobileNet(keras.layers.Layer):
         self.norm2 = keras.layers.BatchNormalization(caxis, 0.999, 1e-3, name='MobilenetV3/Conv_1/'+'BatchNorm/')
         self.pool = keras.layers.GlobalAveragePooling2D()
         self.param = [
-            (16*alpha,),
-            (16*alpha, 3, 2, 1, 'relu', True),
-            (24*alpha, 3, 2, 72/16, 'relu', False),
-            (24*alpha, 3, 1, 88/24, 'relu', False),
-            (40*alpha, 5, 2, 4, 'hswish', True),
-            (40*alpha, 5, 1, 6, 'hswish', True),
-            (40*alpha, 5, 1, 6, 'hswish', True),
-            (48*alpha, 5, 1, 3, 'hswish', True),
-            (48*alpha, 5, 1, 3, 'hswish', True),
-            (96*alpha, 5, 2, 6, 'hswish', True),
-            (96*alpha, 5, 1, 6, 'hswish', True),
-            (96*alpha, 5, 1, 6, 'hswish', True)]
-
-        for i1 in range(1, len(self.param)):
-            p1, p2, p3, p4, p5, p6 = self.param[i1]
-            name1 = 'MobilenetV3/expanded_conv_'+str(i1-1)+'/' if i1 > 1 else 'MobilenetV3/expanded_conv/'
-            self.encoder += [Bottleneck(name1, p2, p3, self.param[i1-1][0], p1, p4, caxis, p5, p6)]
-
-    def dividing(self, v, minv=None):
-        valu1 = max(self.div if minv is None else minv, int(v+self.div/2)//self.div*self.div)
-        return valu1+self.div if valu1 < 0.9*v else valu1
+            (16,),
+            (16, 3, 2, 1, 'relu', True),
+            (24, 3, 2, 72/16, 'relu', False),
+            (24, 3, 1, 88/24, 'relu', False),
+            (40, 5, 2, 4, 'hswish', True),
+            (40, 5, 1, 6, 'hswish', True),
+            (40, 5, 1, 6, 'hswish', True),
+            (48, 5, 1, 3, 'hswish', True),
+            (48, 5, 1, 3, 'hswish', True),
+            (96, 5, 2, 6, 'hswish', True),
+            (96, 5, 1, 6, 'hswish', True),
+            (96, 5, 1, 6, 'hswish', True)] if param is None else param
+        self.encoder = [Bottleneck(
+            'MobilenetV3/expanded_conv_'+str(i1-1)+'/' if i1 > 1 else 'MobilenetV3/expanded_conv/',
+            self.param[i1][1],
+            self.param[i1][2],
+            self.param[i1-1][0]*alpha,
+            self.param[i1][0]*alpha,
+            self.param[i1][3],
+            caxis,
+            self.param[i1][4],
+            self.param[i1][5]) for i1 in range(1, len(self.param))]
 
     def loading(self, ckpt):
         _ = self.propagating(tf.ones((2, 224, 224, 3)))
-        name1 = [i1.name[:-2] for i1 in self.weights]
-        name1 = [i1.replace('kernel', 'weights').replace('bias', 'biases') for i1 in name1]
+        name1 = [i1.name[:-2].replace('kernel', 'weights').replace('bias', 'biases') for i1 in self.weights]
         keras.backend.batch_set_value(zip(self.weights, [tf.train.load_variable(ckpt, i1) for i1 in name1]))
 
     def propagating(self, x, training=False):
@@ -377,16 +370,16 @@ class AdamW(keras.optimizers.Optimizer):
             self.add_slot(var, 'v')
 
     @staticmethod
-    def _rate_sch(rate, step, total, lmode):
+    def _rate_sch(rate, step, total):
         warm1 = total*0.1
-        return tf.where(step < warm1, rate*step/warm1, rate*(total-step)/(total-warm1)) if lmode != 1 else rate
+        return tf.where(step < warm1, rate*step/warm1, rate*(total-step)/(total-warm1))
 
     def _prepare_local(self, var_device, var_dtype, apply_state):
         super(AdamW, self)._prepare_local(var_device, var_dtype, apply_state)
         step1 = tf.cast(self.iterations+1, var_dtype)
         beta1 = tf.identity(self._get_hyper('beta_1', var_dtype))
         beta2 = tf.identity(self._get_hyper('beta_2', var_dtype))
-        rate1 = self._rate_sch(apply_state[(var_device, var_dtype)]['lr_t'], step1, self.step+1, self.lmode)
+        rate1 = self._rate_sch(apply_state[(var_device, var_dtype)]['lr_t'], step1, self.step+1)
         apply_state[(var_device, var_dtype)].update(dict(
             lr=rate1,
             epsilon=tf.convert_to_tensor(self.epsilon, var_dtype),
@@ -548,9 +541,8 @@ class Tokenizer:
             [0x2B820, 0x2CEAF], [0xF900, 0xFAFF], [0x2F800, 0x2FA1F], [33, 64], [91, 96], [123, 126]]
 
     def loading(self, path, encoding='utf-8'):
-        with open(path, encoding=encoding) as f1:
-            for i1, j1 in enumerate(f1):
-                self.vocab[j1.strip()] = i1
+        for i1, j1 in enumerate(open(path, encoding=encoding)):
+            self.vocab[j1.strip()] = i1
 
     def separating(self, text):
         text1 = []
@@ -565,17 +557,25 @@ class Tokenizer:
             text1 = text1+[' ', c1, ' '] if char1 else text1+[c1]
             char1 = False
 
-        return ''.join(text1).replace('[ mask ]', '[MASK]').strip().split()
+        text2 = ''.join(text1).replace('[ mask ]', '[MASK]').strip().split()
+        return text2, len(text2)
 
-    def encoding(self, a, b=None, maxlen=64):
-        a1 = ['[CLS]']+self.separating(a)+['[SEP]']
-        b1 = self.separating(b)+['[SEP]'] if b is not None else []
-        sent1 = (a1+b1)[:maxlen]
-        segm1 = ([0]*len(a1)+[1]*len(b1))[:maxlen]
-        mask1 = [0]*len(sent1)+[1]*(maxlen-len(sent1))
-        sent1 = sent1+['[PAD]']*(maxlen-len(sent1))
-        segm1 = segm1+[segm1[-1]]*(maxlen-len(segm1))
-        return [self.vocab.get(i1, self.vocab['[UNK]']) for i1 in sent1], segm1, mask1
+    def truncating(self, a, b, maxlen):
+        a1, l1 = self.separating(a)
+        b1, l2 = self.separating(b) if b is not None else ([], 0)
+        a2 = a1[:min(l1, int(np.ceil(maxlen/2)))] if l1 < l2 else a1[:max(maxlen-l2, int(np.ceil(maxlen/2)))]
+        b2 = b1[:min(l2, int(np.floor(maxlen/2)))] if l2 < l1 else b1[:max(maxlen-l1, int(np.floor(maxlen/2)))]
+        return a2, b2
+
+    def encoding(self, a, b=None, maxlen=64, length=False):
+        a1, b1 = self.truncating(a, b, maxlen-2 if b is None else maxlen-3)
+        a1 = ['[CLS]']+a1+['[SEP]']
+        b1 = b1+['[SEP]'] if b is not None else b1
+        leng1 = len(a1)+len(b1)
+        sent1 = [self.vocab.get(i1, self.vocab['[UNK]']) for i1 in (a1+b1+['[PAD]']*(maxlen-leng1))]
+        segm1 = [0]*len(a1)+[1]*len(b1)+[0 if b is None else 1]*(maxlen-leng1)
+        mask1 = [0]*leng1+[1]*(maxlen-leng1)
+        return (sent1, segm1, mask1, leng1) if length else (sent1, segm1, mask1)
 
 
 """Tests"""
@@ -590,7 +590,7 @@ def bert_testing(sentence=None, mlm=False):
     bert1.loading('./models/bert_base_ch/bert_model.ckpt')
     text1, segm1, mask1 = toke1.encoding('感觉[MASK]就像一只猪。' if sentence is None else sentence)
     pred1 = bert1.propagating(np.array([text1]), np.array([segm1]), np.array([mask1]))
-    pred1 = np.array(np.argmax(pred1, axis=-1)[0]) if mlm else pred1[:, :text1.index(0), :]
+    pred1 = np.array(np.argmax(pred1[0], axis=-1)[0]) if mlm else pred1[:, :text1.index(0), :]
     print(''.join([voca1[pred1[i1]] for i1 in range(1, text1.index(0)-1)]) if mlm else pred1)
 
 
