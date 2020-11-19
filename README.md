@@ -1,5 +1,5 @@
 ## Description
-Just my simple BERT implementation (also including ALBERT, ELECTRA, RoBERTa, and GPT-2), mainly for the purpose of practicing TensorFlow 2. This code is partly incomplete, and may have some mistakes.
+Just my simple BERT implementation (also including GPT-2, ALBERT, ELECTRA, RoBERTa, and ConvBERT), mainly for the purpose of practicing TensorFlow 2. This code is partly incomplete, and may have some mistakes.
 ## References
 https://github.com/tensorflow/tensorflow  
 https://github.com/google-research/bert  
