@@ -24,6 +24,6 @@ class LazyAdam(adamw.AdamW):
         v2 = self._resource_scatter_update(v1, indices, vsli1)
 
         with tf.control_dependencies([m2, v2]):
-            u1 = -coef1['lr']*msli1/(tf.sqrt(vsli1)+coef1['epsilon'])
-            u2 = u1-coef1['lr']*tf.gather(var, indices)*self.drate
+            u1 = -coef1['lr_t']*msli1/(tf.sqrt(vsli1)+coef1['epsilon'])
+            u2 = u1-coef1['lr_t']*tf.gather(var, indices)*self.drate
             return tf.group(*[self._resource_scatter_add(var, indices, u2), m2, v2])

@@ -7,16 +7,18 @@ https://tensorflow.google.cn/tutorials/text/text_classification_rnn
 """
 
 import tensorflow as tf
+import tensorflow.keras as keras
 
 
-class TextRNN(tf.keras.Model):
+class TextRNN(keras.Model):
     def __init__(self, vocsize, embsize, dim, outdim, cate, drop, **kwargs):
         super(TextRNN, self).__init__(**kwargs)
-        self.emb = tf.keras.layers.Embedding(vocsize, embsize)
-        self.dense = tf.keras.layers.Dense(outdim, activation='relu')
-        self.drop = tf.keras.layers.Dropout(drop)
-        self.cls = tf.keras.layers.Dense(cate)
-        self.rnn = [tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(
+        self.config = {'cell': dim}
+        self.emb = keras.layers.Embedding(vocsize, embsize)
+        self.dense = keras.layers.Dense(outdim, activation='relu')
+        self.drop = keras.layers.Dropout(drop)
+        self.cls = keras.layers.Dense(cate)
+        self.rnn = [keras.layers.Bidirectional(keras.layers.LSTM(
             d1, return_sequences=(i1 < len(dim)-1))) for i1, d1 in enumerate(dim)]
 
     def call(self, x, softmax=False, **kwargs):
@@ -28,6 +30,9 @@ class TextRNN(tf.keras.Model):
         x1 = self.cls(self.drop(self.dense(x1)))
         return tf.nn.softmax(x1) if softmax else x1
 
+    def get_config(self):
+        return self.config
+
 
 def textrnn_training():  # Test accuracy is about 0.86.
     import tensorflow_datasets as tfds
@@ -38,7 +43,7 @@ def textrnn_training():  # Test accuracy is about 0.86.
     train_1 = data_1['train'].shuffle(buffer_1).padded_batch(batch_1)
     test_1 = data_1['test'].padded_batch(batch_1)
     model_1 = TextRNN(info_1.features['text'].encoder.vocab_size, embsize_1, dim_1, outdim_1, cate_1, drop_1)
-    loss_1 = tf.keras.losses.BinaryCrossentropy(from_logits=True)
-    model_1.compile(tf.keras.optimizers.Adam(lr_1), loss_1, ['accuracy'])
+    loss_1 = keras.losses.BinaryCrossentropy(from_logits=True)
+    model_1.compile(keras.optimizers.Adam(lr_1), loss_1, ['accuracy'])
     model_1.fit(train_1, epochs=epoch_1, validation_data=test_1, validation_steps=30)
     return model_1

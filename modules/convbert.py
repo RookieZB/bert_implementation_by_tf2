@@ -189,8 +189,7 @@ def convbert_finetuning():  # Dev accuracy is about 0.9037.
 
         for i in range(len(data)):
             text2, seg2, mask2 = tokenizer.encoding(data['sentence'][i], None, maxlen)
-            text1, seg1, mask1 = text1+[text2], seg1+[seg2], mask1+[mask2]
-            label1.append(data['label'][i])
+            text1, seg1, mask1, label1 = text1+[text2], seg1+[seg2], mask1+[mask2], label1+[data['label'][i]]
 
         text1, seg1, mask1, label1 = np.array(text1), np.array(seg1), np.array(mask1), np.array(label1)
         data1 = tf.data.Dataset.from_tensor_slices((text1, seg1, mask1, label1))
@@ -207,38 +206,39 @@ def convbert_finetuning():  # Dev accuracy is about 0.9037.
             x1 = self.bert.propagating(text, segment, mask, training)[:, 0, :]
             return self.dense(self.drop(x1, training=training))
 
+        def get_config(self):
+            return self.bert.param
+
     @tf.function
     def step_training(text, segment, mask, y):
         with tf.GradientTape() as tape_1:
             pred_1 = model_1.propagating(text, segment, mask, True)
             value_1 = function_1(y, pred_1)
 
-        grad_1 = tape_1.gradient(value_1, model_1.trainable_variables)
-        grad_1, _ = tf.clip_by_global_norm(grad_1, 1.0)
+        grad_1, _ = tf.clip_by_global_norm(tape_1.gradient(value_1, model_1.trainable_variables), 1.0)
         optimizer_1.apply_gradients(zip(grad_1, model_1.trainable_variables))
         loss_1(value_1)
         acc_1(y, pred_1)
 
     @tf.function
     def step_evaluating(text, segment, mask, y):
-        pred_1 = model_1.propagating(text, segment, mask, False)
-        acc_2(y, pred_1)
+        acc_2(y, model_1.propagating(text, segment, mask, False))
 
     tokenizer_1 = mm.Tokenizer()
     tokenizer_1.loading(vocab_1)
     data_1 = nlp.load_dataset('glue', 'sst2')
     training_1, dev_1 = pd.DataFrame(data_1['train']), pd.DataFrame(data_1['validation'])
-    training_2 = data_processing(training_1, tokenizer_1, batch_1, maxlen_1, True)
-    dev_2 = data_processing(dev_1, tokenizer_1, batch_1, maxlen_1, False)
+    training_2 = data_processing(training_1, tokenizer_1, maxlen_1, batch_1, True)
+    dev_2 = data_processing(dev_1, tokenizer_1, maxlen_1, batch_1, False)
 
     model_1 = ModelBERT(m_1, drop_1, cate_1)
     model_1.bert.loading(ckpt_1)
     function_1 = keras.losses.SparseCategoricalCrossentropy()
     optimizer_1 = mm.AdamW(epoch_1*(int(len(training_1)/batch_1)+1), lr_1, lmode=2, ldecay=ldecay_1)
 
-    loss_1 = tf.keras.metrics.Mean(name='training_loss')
-    acc_1 = tf.keras.metrics.SparseCategoricalAccuracy(name='training_accuracy')
-    acc_2 = tf.keras.metrics.SparseCategoricalAccuracy(name='dev_accuracy')
+    loss_1 = keras.metrics.Mean(name='training_loss')
+    acc_1 = keras.metrics.SparseCategoricalAccuracy(name='training_accuracy')
+    acc_2 = keras.metrics.SparseCategoricalAccuracy(name='dev_accuracy')
     temp_1 = 'Training loss is {:.4f}, and accuracy is {:.4f}.'
     temp_2 = 'Dev accuracy is {:.4f}, and epoch cost is {:.4f}.'
 
@@ -250,7 +250,7 @@ def convbert_finetuning():  # Dev accuracy is about 0.9037.
             time_1, count_1 = time.time(), count_1+1
             step_training(x_1, x_2, x_3, y_1)
 
-            if count_1 % 250 == 0:
+            if count_1 % 500 == 0:
                 print(temp_1.format(float(loss_1.result()), float(acc_1.result())))
 
         for x_1, x_2, x_3, y_1 in dev_2:

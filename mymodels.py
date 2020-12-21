@@ -17,7 +17,6 @@ import json
 import numpy as np
 import tensorflow as tf
 import tensorflow.keras as keras
-import tensorflow.python as ops
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 warnings.filterwarnings('ignore')
@@ -49,19 +48,24 @@ def hsigmoid_activating(x):
 """Layers"""
 
 
-class InstanceNormalization(keras.layers.Layer):
-    """Instance normalization layer"""
-    def __init__(self, eps=1e-5):
-        super(InstanceNormalization, self).__init__()
-        self.epsilon, self.scale, self.offset = eps, None, None
+class Normalization(keras.layers.Layer):
+    """Normalization layer"""
+    def __init__(self, method, eps=1e-3, init=None, **kwargs):
+        super(Normalization, self).__init__(**kwargs)
+        self.method, self.epsilon, self.init, self.gamma, self.beta = method, eps, init, None, None
+        self.axis = [-1] if method == 'layer' else [1, 2] if method == 'instance' else None
+
+        if method not in ['layer', 'instance']:
+            raise Exception('Unrecognized method "{}".'.format(method))
 
     def build(self, size):
-        self.scale = self.add_weight('scale', size[-1:], None, tf.random_normal_initializer(1., 0.02), trainable=True)
-        self.offset = self.add_weight('offset', size[-1:], None, 'zeros', trainable=True)
+        size1 = size[-1] if self.method == 'layer' else size[-1:] if self.method == 'instance' else None
+        self.gamma = self.add_weight('gamma', size1, None, 'ones' if self.init is None else self.init)
+        self.beta = self.add_weight('beta', size1, None, 'zeros')
 
-    def propagating(self, x):
-        m1, v1 = tf.nn.moments(x, [1, 2], None, True)
-        return self.scale*(x-m1)*tf.math.rsqrt(v1+self.epsilon)+self.offset
+    def call(self, x, **kwargs):
+        m1, v1 = tf.nn.moments(x, self.axis, None, True)
+        return self.gamma*(x-m1)*tf.math.rsqrt(v1+self.epsilon)+self.beta
 
 
 class Attention(keras.layers.Layer):
@@ -135,7 +139,7 @@ class Embedding(keras.layers.Layer):
         self.drop = keras.layers.Dropout(drop)
 
     def propagating(self, x, seg=None, pos=None, training=False):
-        p1 = tf.slice(self.posemb, [0, 0], [x.shape[1], -1]) if pos is None else tf.gather(self.posemb, pos)
+        p1 = tf.slice(self.posemb, [0, 0], [tf.shape(x)[1], -1]) if pos is None else tf.gather(self.posemb, pos)
         e1 = tf.gather(self.emb, x)+(self.segemb(seg) if self.mlm else 0.)+p1
         return self.drop(self.norm(e1) if self.mlm else e1, training=training)
 
@@ -267,7 +271,7 @@ class BERT(keras.layers.Layer):
             if self.mode == 'mlm':
                 self.dense = keras.layers.Dense(self.embsize, self.act, True, w_initializing(), name=self.namel[0])
                 self.norm = keras.layers.LayerNormalization(-1, 1e-6, name=self.namel[1])
-                self.outbias = self.add_weight(self.namel[2], self.param['vocab_size'], initializer='zeros')
+                self.outbias = self.add_weight(self.namel[2], self.param['vocab_size'], None, 'zeros')
 
         else:
             raise Exception('Unrecognized model "{}".'.format(self.model))
@@ -294,7 +298,7 @@ class BERT(keras.layers.Layer):
 
 
 class GPT(keras.layers.Layer):
-    """GPT model (perhaps will merge with BERT class later)"""
+    """GPT model"""
     def __init__(self, config, **kwargs):
         super(GPT, self).__init__(**kwargs)
         self.param = json.load(open(config)) if type(config) is str else config
@@ -528,10 +532,9 @@ class AdamW(keras.optimizers.Optimizer):
 
 class AdamWV2(keras.optimizers.Adam):
     """AdamW optimizer V2"""
-    def __init__(self, step, lrate=1e-3, b1=0.9, b2=0.999, drate=1e-2, name='AdamW', **kwargs):
-        super(AdamWV2, self).__init__(lrate, b1, b2, name=name, **kwargs)
-        self.step, self.drate = step, drate
-        self.spec = ['bias', 'normalization', 'lnorm', 'layernorm']
+    def __init__(self, step, lrate=1e-3, drate=1e-2, name='AdamW', **kwargs):
+        super(AdamWV2, self).__init__(learning_rate=lrate, name=name, **kwargs)
+        self.step, self.drate, self.spec = step, drate, ['bias', 'normalization', 'lnorm', 'layernorm']
 
     @staticmethod
     def _rate_sch(rate, step, total):
@@ -540,39 +543,26 @@ class AdamWV2(keras.optimizers.Adam):
 
     def _prepare_local(self, var_device, var_dtype, apply_state):
         super(AdamWV2, self)._prepare_local(var_device, var_dtype, apply_state)
-        step1 = tf.cast(self.iterations+1, var_dtype)
-        rate0 = apply_state[(var_device, var_dtype)]['lr_t']
-        rate1 = self._rate_sch(rate0, step1, self.step+1)
-        apply_state[(var_device, var_dtype)].update(dict(lr=rate1))
+        rate1 = self._rate_sch(1., tf.cast(self.iterations+1, var_dtype), self.step+1)
+        apply_state[(var_device, var_dtype)]['lr_t'] *= rate1
+        apply_state[(var_device, var_dtype)]['lr'] *= rate1
 
-    def _resource_apply_base(self, grad, var, indices=None, apply_state=None):
-        devi1, type1, name1 = var.device, var.dtype.base_dtype, var.name
-        spec1 = any(c1 in name1.lower() for c1 in self.spec)
+    def _resource_apply_base(self, var, apply_state=None):
+        devi1, type1, spec1 = var.device, var.dtype.base_dtype, any(c1 in var.name.lower() for c1 in self.spec)
         coef1 = ((apply_state or {}).get((devi1, type1)) or self._fallback_apply_state(devi1, type1))
-        deca1 = tf.no_op if spec1 else var.assign_sub(coef1['lr']*var*self.drate, use_locking=self._use_locking)
-        m1 = self.get_slot(var, 'm')
-        v1 = self.get_slot(var, 'v')
+        return tf.no_op if spec1 else var.assign_sub(coef1['lr_t']*var*self.drate, use_locking=self._use_locking)
 
-        if indices is None:
-            with tf.control_dependencies([deca1]):
-                return ops.training.training_ops.resource_apply_adam(
-                    var.handle, m1.handle, v1.handle, coef1['beta_1_power'], coef1['beta_2_power'], coef1['lr'],
-                    coef1['beta_1_t'], coef1['beta_2_t'], coef1['epsilon'], grad, use_locking=self._use_locking)
+    def _resource_apply_dense(self, grad, var, apply_state=None):
+        deca1 = self._resource_apply_base(var, apply_state)
 
-        m2 = m1.assign(coef1['beta_1_t']*m1, self._use_locking)
-        v2 = v1.assign(coef1['beta_2_t']*v1, self._use_locking)
+        with tf.control_dependencies([deca1]):
+            return super(AdamWV2, self)._resource_apply_dense(grad, var, apply_state)
 
-        with tf.control_dependencies([m2, v2, deca1]):
-            m2 = self._resource_scatter_add(m1, indices, coef1['one_minus_beta_1_t']*grad)
-            v2 = self._resource_scatter_add(v1, indices, coef1['one_minus_beta_2_t']*grad*grad)
-            u1 = coef1['lr']*m2/(tf.sqrt(v2)+coef1['epsilon'])
-            return tf.group(*[var.assign_sub(u1, self._use_locking), m2, v2])
+    def _resource_apply_sparse(self, grad, var, indices, apply_state=None):
+        deca1 = self._resource_apply_base(var, apply_state)
 
-    def _resource_apply_dense(self, grad, var, apply_state=None, **kwargs):
-        return self._resource_apply_base(grad, var, None, apply_state)
-
-    def _resource_apply_sparse(self, grad, var, indices, apply_state=None, **kwargs):
-        return self._resource_apply_base(grad, var, indices, apply_state)
+        with tf.control_dependencies([deca1]):
+            return super(AdamWV2, self)._resource_apply_sparse(grad, var, indices, apply_state)
 
     def get_config(self):
         conf1 = super(AdamWV2, self).get_config()

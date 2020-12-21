@@ -23,30 +23,30 @@ class Word2Vec(keras.Model):
         self.annoy, self.normemb = None, None
 
     def call(self, pair, softmax=False, **kwargs):
-        e1 = [self.conemb(pair[1]), self.taremb(pair[0])]
-        x1 = self.flat(self.dot(e1))
+        x1 = self.flat(self.dot([self.conemb(pair[1]), self.taremb(pair[0])]))
         return tf.nn.softmax(x1) if softmax else x1
 
     def update(self):
         v1 = self.taremb.weights[0]
-        self.normemb = v1/tf.norm(v1, 2, -1, True)
-        self.annoy = AnnoyIndex(self.dim, metric='angular')
+        self.normemb, self.annoy = v1/tf.norm(v1, 2, -1, True), AnnoyIndex(self.dim, metric='angular')
 
         for i1, v2 in enumerate(self.normemb):
             self.annoy.add_item(i1, v2)
 
         self.annoy.build(self.tree)
 
-    def search(self, key, num=5, annoy=False):
+    def search(self, key, num=5, tree=False):
         k1 = self.normemb[self.vocab.index(key)]
 
-        if annoy:
+        if tree:
             l1, d1 = self.annoy.get_nns_by_vector(k1, num, include_distances=True)
             return [self.vocab[i1] for i1 in l1]
         else:
             d1 = tf.matmul(self.normemb, tf.expand_dims(k1, -1))[:, 0]
-            l1 = tf.argsort(d1, direction='DESCENDING').numpy().tolist()
-            return [self.vocab[i1] for i1 in l1][:num]
+            return [self.vocab[i1] for i1 in tf.argsort(d1, direction='DESCENDING').numpy().tolist()][:num]
+
+    def get_config(self):
+        return {'vocsize': self.vocsize, 'embsize': self.dim, 'treenum': self.tree}
 
 
 def w2v_training():  # Final loss is about 0.47.
