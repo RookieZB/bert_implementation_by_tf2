@@ -349,7 +349,7 @@ class GPT(keras.layers.Layer):
 
     def searching(self, score, beam, flag):
         v1, i1 = tf.math.top_k(tf.reshape(score, [-1, (beam**flag)*self.param['n_vocab']]), beam)
-        p1 = tf.reshape(tf.expand_dims(tf.range(v1.shape[0])*(beam**flag), 1)+(i1//self.param['n_vocab']), [-1, 1])
+        p1 = tf.reshape(tf.expand_dims(tf.range(tf.shape(v1)[0])*(beam**flag), 1)+(i1//self.param['n_vocab']), [-1, 1])
         return tf.reshape(i1 % self.param['n_vocab'], [-1, 1]), p1
 
     def calculating(self, score, cur, beam, k, p, length, penalty, first):
