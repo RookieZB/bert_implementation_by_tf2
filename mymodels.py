@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Title: My Implementation of Models by TensorFlow
-Author: Chris Chen
-Date: 2020/02/02
-Update: 2020/09/25
+My Implementation of Models by TensorFlow
+Chris Chen
 
 """
 
@@ -174,7 +172,7 @@ class Bottleneck(keras.layers.Layer):
 
 
 class CRF(keras.layers.Layer):
-    """CRF layer"""
+    """CRF layer (not completed)"""
     def __init__(self, dim, **kwargs):
         super(CRF, self).__init__(**kwargs)
         self.transition = self.add_weight('crf/transition', (dim, dim), None, 'glorot_uniform')
@@ -205,8 +203,15 @@ class CRF(keras.layers.Layer):
             stat1[:, i1], path1[:, i1] = np.max(s1, 1)+batch[:, i1], np.argmax(s1, 1)
 
         rang1 = np.stack([np.arange(mask1.shape[0]), mask1-1]).T
-        inde1 = np.argmax(tf.gather_nd(stat1, rang1), 1)
-        return [path1[i1, :, inde1[i1]][1:rang1[i1, 1]+1].tolist()+[inde1[i1]*1.0] for i1 in range(len(inde1))]
+        inde1, reco1 = np.argmax(tf.gather_nd(stat1, rang1), 1), [[]]*len(batch)
+
+        for i1 in range(len(inde1)):
+            reco1[i1], p1 = [inde1[i1]*1.0], path1[i1, 1:rang1[i1, 1]+1]
+
+            for j1 in reversed(p1):
+                reco1[i1].append(j1[int(reco1[i1][-1])])
+
+        return [i1[::-1] for i1 in reco1]
 
 
 """Models"""
