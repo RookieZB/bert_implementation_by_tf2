@@ -172,8 +172,7 @@ class Embedding(keras.layers.Layer):
         v1 = image+tf.slice(self.emb5, [0, 0], [tf.shape(image)[1], -1])+self.calculating(imagebox)
         t1 = self.emb6(text)+tf.slice(self.emb5, [0, 0], [tf.shape(text)[1], -1])+self.calculating(textbox)
         v1 = self.drop1(self.norm1(v1 if self.ve is None else v1+self.ve), training=training)
-        t1 = self.drop2(self.norm2(t1+self.emb7(seg)), training=training)
-        return tf.concat([t1, v1], 1)
+        return tf.concat([self.drop2(self.norm2(t1+self.emb7(seg)), training=training), v1], 1)
 
 
 class LayoutLM(keras.layers.Layer):
@@ -316,7 +315,8 @@ class LayoutLM(keras.layers.Layer):
         return r1, x1+y1 if t2 else None
 
     def propagating(self, x, text, box, seg=None, mask=None, training=False):
-        s1, m1 = tf.zeros_like(text) if seg is None else seg, tf.zeros_like(text) if mask is None else mask
+        s1 = tf.zeros_like(text) if seg is None else seg
+        m1 = None if mask is None else tf.concat([mask, tf.zeros((tf.shape(x)[0], self.resnet.size**2), tf.int32)], 1)
         list1, stat1, bbox1 = self.resnet.propagating(x, training=training)
         p1 = tf.repeat(keras.backend.arange(0, tf.shape(text)[1])[tf.newaxis, :], tf.shape(text)[0], 0)
         p2 = tf.repeat(keras.backend.arange(0, self.resnet.size**2)[tf.newaxis, :], tf.shape(text)[0], 0)
@@ -324,6 +324,6 @@ class LayoutLM(keras.layers.Layer):
         r1, r2 = self.calculating(tf.concat([p1, p2], 1), tf.concat([box, bbox1], 1))
 
         for i1 in range(len(self.encoder)):
-            x1 = self.encoder[i1].propagating(x1, mask, r1, r2, training=training)
+            x1 = self.encoder[i1].propagating(x1, m1, r1, r2, training=training)
 
         return stat1, x1, tf.nn.tanh(self.pool(x1[:, 0, :]))
