@@ -1,5 +1,5 @@
 ## Description
-My simple BERT implementation by TensorFlow 2, currently including BERT, GPT-2, ALBERT, ELECTRA, RoBERTa, and ConvBERT. DETR, DPR, and LayoutLMv2 are to be completed. This code is partly incomplete, and may have some mistakes.
+My simple BERT implementation by TensorFlow 2, currently including BERT, GPT-2, ALBERT, ELECTRA, RoBERTa, and ConvBERT. DETR, DPR, LayoutLM, and BEiT are to be completed. This code is partly incomplete, and may have some mistakes.
 ## References
 https://github.com/tensorflow/tensorflow  
 https://github.com/tensorflow/addons  
