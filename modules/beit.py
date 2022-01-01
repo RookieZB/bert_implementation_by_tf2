@@ -113,7 +113,6 @@ class BEiT(keras.layers.Layer):
         super(BEiT, self).__init__(**kwargs)
         self.param, self.mode = json.load(open(config)) if type(config) is str else config, mode
         self.rpl = {'/': '.', 'kernel': 'weight', 'gamma': 'weight', 'beta': 'bias'}
-        self.act = gelu_activating if self.param['hidden_act'] == 'gelu' else self.param['hidden_act']
         self.pb = PositionBias('beit.encoder.relative_position_bias.', self.param['num_attention_heads'], [self.param[
             'image_size']//self.param['patch_size']]*2) if self.param['use_shared_relative_position_bias'] else None
         self.emb = Embedding(
@@ -132,7 +131,7 @@ class BEiT(keras.layers.Layer):
             self.param['drop_path_rate'],
             self.param['attention_probs_dropout_prob'],
             self.param['hidden_dropout_prob'],
-            self.act,
+            gelu_activating if self.param['hidden_act'] == 'gelu' else self.param['hidden_act'],
             self.param['layer_norm_eps']) for i1 in range(self.param['num_hidden_layers'])]
 
         if mode == 'mim':
@@ -158,12 +157,13 @@ class BEiT(keras.layers.Layer):
         keras.backend.batch_set_value(zip(self.weights, t1))
 
     def propagating(self, image, training=False):
-        x1 = self.emb.propagating(image, None, training)
+        x1, l1 = self.emb.propagating(image, None, training), []
         p1 = self.pb.propagating() if self.pb is not None else None
 
         for i1 in range(len(self.encoder)):
             x1 = self.encoder[i1].propagating(x1, p1, training)
+            l1.append(x1)
 
         p1 = tf.reduce_mean(x1[:, 1:, :], 1) if self.mode == 'cls' else x1 if self.mode == 'mim' else None
         x2 = self.head(self.norm(p1)) if self.mode in ['mim', 'cls'] else None
-        return x1, x2
+        return x1, x2, l1
