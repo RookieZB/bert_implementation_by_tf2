@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 
 """
-GPT-2 (https://github.com/openai/gpt-2)
+GPT-2
+https://github.com/openai/gpt-2
 
 """
 
@@ -25,10 +26,10 @@ def gelunew_activating(x):
     return 0.5*x*(1.0+tf.tanh((np.sqrt(2/np.pi)*(x+0.044715*tf.pow(x, 3)))))
 
 
-class Attention(keras.layers.Layer):
-    def __init__(self, bname, lname, head, size, attdrop=0., drop=0., eps=1e-6, ninf=-1e4, **kwargs):
-        super(Attention, self).__init__(**kwargs)
-        self.head, self.size, self.dim, self.ninf = head, size, head*size, ninf
+class GPTAttention(keras.layers.Layer):
+    def __init__(self, bname, lname, head, size, attdrop=0., drop=0., eps=1e-6, ninf=-1e4, simple=True, **kwargs):
+        super(GPTAttention, self).__init__(**kwargs)
+        self.head, self.size, self.dim, self.ninf, self.simple = head, size, head*size, ninf, simple
         self.wq = keras.layers.Dense(self.dim*3, None, True, w_initializing(), name=bname+lname[0])
         self.dense = keras.layers.Dense(self.dim, None, True, w_initializing(), name=bname+lname[3])
         self.norm = keras.layers.LayerNormalization(-1, eps, name=bname+lname[4])
@@ -55,15 +56,16 @@ class Attention(keras.layers.Layer):
         k2 = tf.concat([past[:, 0], k1], -2) if past is not None else k1
         v2 = tf.concat([past[:, 1], v1], -2) if past is not None else v1
         m1 = tf.range(tf.shape(q1)[1])[:, tf.newaxis] < tf.range(tf.shape(k2)[1])-tf.shape(k2)[1]+tf.shape(q1)[1]
-        x1, a1 = self.calculating(q1, k2, v2, m1 if mask is None else mask, mask is None, training)
+        m1 = m1 if mask is None or self.simple else mask
+        x1, a1 = self.calculating(q1, k2, v2, m1, True if mask is None or self.simple else False, training)
         x1 = tf.reshape(tf.transpose(x1, [0, 2, 1, 3]), [-1, tf.shape(x1)[2], self.dim])
         return x+self.drop(self.dense(x1), training=training), a1, tf.stack([k1, v1], 1)
 
 
-class TransEncoder(keras.layers.Layer):
-    def __init__(self, bname, lname, head, size, dff, attdrop=0., drop=0., act='relu', eps=1e-6, **kwargs):
-        super(TransEncoder, self).__init__(**kwargs)
-        self.att = Attention(bname, lname, head, size, attdrop, drop, eps)
+class GPTEncoder(keras.layers.Layer):
+    def __init__(self, bname, lname, head, size, dff, attdrop=0., drop=0., act=None, eps=1e-6, simple=True, **kwargs):
+        super(GPTEncoder, self).__init__(**kwargs)
+        self.att = GPTAttention(bname, lname, head, size, attdrop, drop, eps, simple=simple)
         self.norm = keras.layers.LayerNormalization(-1, eps, name=bname+lname[7])
         self.dense1 = keras.layers.Dense(dff, act, True, w_initializing(), name=bname+lname[5])
         self.dense2 = keras.layers.Dense(int(head*size), None, True, w_initializing(), name=bname+lname[6])
@@ -74,9 +76,9 @@ class TransEncoder(keras.layers.Layer):
         return x1+self.drop(self.dense2(self.dense1(self.norm(x1))), training=training), p1
 
 
-class Embedding(keras.layers.Layer):
+class GPTEmbedding(keras.layers.Layer):
     def __init__(self, lname, voc, dim, maxlen=512, drop=0., **kwargs):
-        super(Embedding, self).__init__(**kwargs)
+        super(GPTEmbedding, self).__init__(**kwargs)
         self.emb = self.add_weight(lname[0], (voc, dim), None, w_initializing())
         self.posemb = self.add_weight(lname[1], (maxlen, dim), None, w_initializing())
         self.drop = keras.layers.Dropout(drop)
@@ -87,20 +89,20 @@ class Embedding(keras.layers.Layer):
 
 
 class GPT(keras.layers.Layer):
-    def __init__(self, config, head='', **kwargs):
+    def __init__(self, config, head='', simple=True, **kwargs):
         super(GPT, self).__init__(**kwargs)
-        self.ninf, self.eos, self.end = -1e6, 50256, [50256]
+        self.ninf, self.eos, self.end, self.simple = -1e6, 50256, [50256], simple
         self.param = json.load(open(config)) if type(config) is str else config
         self.rpl = {'/': '.', 'kernel': 'weight', 'gamma': 'weight', 'beta': 'bias'}
         self.act = {'gelu': gelu_activating, 'gelu_new': gelunew_activating}
         self.norm = keras.layers.LayerNormalization(-1, self.param['layer_norm_epsilon'], name=head+'ln_f')
-        self.embedding = Embedding(
+        self.embedding = GPTEmbedding(
             [head+'wte.weight', head+'wpe.weight'],
             self.param['vocab_size'],
             self.param['n_embd'],
             self.param['n_ctx'],
             self.param['embd_pdrop'])
-        self.encoder = [TransEncoder(
+        self.encoder = [GPTEncoder(
             head+'h/'+str(i1),
             ['/attn/c_attn', '', '', '/attn/c_proj', '/ln_1', '/mlp/c_fc', '/mlp/c_proj', '/ln_2'],
             self.param['n_head'],
@@ -109,7 +111,7 @@ class GPT(keras.layers.Layer):
             self.param['attn_pdrop'],
             self.param['resid_pdrop'],
             self.act.get(self.param['activation_function'], self.param['activation_function']),
-            self.param['layer_norm_epsilon']) for i1 in range(self.param['n_layer'])]
+            self.param['layer_norm_epsilon'], simple) for i1 in range(self.param['n_layer'])]
 
     def loading(self, pth):
         _ = self.propagating(tf.ones((2, 2), tf.int32))
@@ -131,6 +133,14 @@ class GPT(keras.layers.Layer):
         x2 = tf.matmul(x1, self.embedding.emb, transpose_b=True)
         return tf.nn.softmax(x2) if softmax else x2, x1, h1
 
+    @tf.function
+    def calling(self, x, hist):
+        return self.propagating(x, None, None, None, hist, False, False)
+
+    @tf.function(experimental_relax_shapes=True)
+    def iterating(self, x, mask, pos, past):
+        return self.propagating(x, mask, pos, past, None, False, False)
+
     def sampling(self, score, cur, beam, k, p, first):
         s1 = cur+self.ninf*(1.-tf.reduce_sum(tf.one_hot(tf.math.top_k(cur, k)[1], self.param['vocab_size']), 1))
         i1 = tf.argsort(s1, -1, 'DESCENDING')
@@ -148,6 +158,7 @@ class GPT(keras.layers.Layer):
         p1 = tf.expand_dims(tf.range(tf.shape(v1)[0])*(beam**flag), 1)+(i1//self.param['vocab_size'])
         return tf.reshape(i1 % self.param['vocab_size'], [-1, 1]), tf.reshape(p1, [-1, 1])
 
+    @tf.function(experimental_relax_shapes=True)
     def calculating(self, score, cur, beam, k, p, length, penalty, first):
         s1 = score/length**penalty
         t1, p1 = self.sampling(s1, cur, beam, k, p, first) if k > 1 else self.searching(s1, beam, not first)
@@ -173,8 +184,7 @@ class GPT(keras.layers.Layer):
         appe1 = tf.one_hot([self.eos], self.param['vocab_size'], 0., 1.)
 
         while i1 < maxlen and len(list1) > 0:
-            hist1 = hist if i1 == 0 and hist is not None else None
-            x2, _, h1 = self.propagating(x1, m1 if i1 > 0 else None, p1+i1 if i1 else None, past1, hist1, False)
+            x2, _, h1 = self.iterating(x1, m1, p1+i1, past1) if i1 else self.calling(x1, hist)
             s1 = tf.nn.log_softmax(tf.squeeze(x2/temp, 1)+fini1*mask1 if i1 else tf.gather_nd(x2/temp, pos, 1))
             x1, h2, scor1, leng1 = self.calculating(scor1+s1, s1, beam, k, p, leng1+appe1, penalty, i1 == 0)
             m1 = tf.concat([m1, [[0]]*x1.shape[0]], -1)
