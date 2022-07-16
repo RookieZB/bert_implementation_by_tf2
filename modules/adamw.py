@@ -10,9 +10,9 @@ import tensorflow.keras as keras
 
 
 class AdamW(keras.optimizers.Adam):
-    def __init__(self, step, lrate=1e-3, drate=1e-2, name='AdamW', **kwargs):
+    def __init__(self, step, lrate=1e-3, drate=1e-2, name='AdamW', sch=True, **kwargs):
         super(AdamW, self).__init__(learning_rate=lrate, name=name, **kwargs)
-        self.step, self.drate, self.spec = step, drate, ['bias', 'normalization', 'lnorm', 'layernorm']
+        self.step, self.drate, self.sch, self.spec = step, drate, sch, ['bias', 'normalization', 'lnorm', 'layernorm']
 
     @staticmethod
     def _rate_sch(rate, step, total):
@@ -21,7 +21,7 @@ class AdamW(keras.optimizers.Adam):
 
     def _prepare_local(self, var_device, var_dtype, apply_state):
         super(AdamW, self)._prepare_local(var_device, var_dtype, apply_state)
-        rate1 = self._rate_sch(1., tf.cast(self.iterations+1, var_dtype), self.step+1)
+        rate1 = self._rate_sch(1., tf.cast(self.iterations+1, var_dtype), self.step+1) if self.sch else 1.
         apply_state[(var_device, var_dtype)]['lr_t'] *= rate1
         apply_state[(var_device, var_dtype)]['lr'] *= rate1
 
@@ -52,7 +52,7 @@ class AdamW(keras.optimizers.Adam):
 class TestAdamW(keras.optimizers.Optimizer):
     def __init__(self, step, lrate=1e-3, b1=0.9, b2=0.999, drate=1e-2, lmode=0, ldecay=None, name='AdamW', **kwargs):
         super(TestAdamW, self).__init__(name, **kwargs)
-        self.step, self.drate, self.lmode, self.ldecay, self.epsilon = step, drate, lmode, ldecay, 1e-6
+        self.step, self.drate, self.lmode, self.ldecay, self.sch, self.epsilon = step, drate, lmode, ldecay, True, 1e-6
         self.spec = ['bias', 'normalization', 'lnorm', 'layernorm']
         self._set_hyper('learning_rate', lrate)
         self._set_hyper('beta_1', b1)
@@ -74,7 +74,7 @@ class TestAdamW(keras.optimizers.Optimizer):
         beta1 = tf.identity(self._get_hyper('beta_1', var_dtype))
         beta2 = tf.identity(self._get_hyper('beta_2', var_dtype))
         apply_state[(var_device, var_dtype)].update(dict(
-            lr=self._rate_sch(rate1, tf.cast(self.iterations+1, var_dtype), self.step+1),
+            lr=self._rate_sch(rate1, tf.cast(self.iterations+1, var_dtype), self.step+1) if self.sch else rate1,
             epsilon=tf.convert_to_tensor(self.epsilon, var_dtype),
             beta_1=beta1,
             beta_1_minus=1-beta1,
