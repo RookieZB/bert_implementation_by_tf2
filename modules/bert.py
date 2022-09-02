@@ -81,9 +81,9 @@ class Embedding(keras.layers.Layer):
         self.norm = keras.layers.LayerNormalization(-1, eps, name=bname+lname[3])
         self.drop = keras.layers.Dropout(drop)
 
-    def propagating(self, x, seg, training=False):
-        e1 = tf.gather(self.emb, x)+tf.gather(self.segemb, seg)+tf.slice(self.posemb, [0, 0], [tf.shape(x)[1], -1])
-        return self.drop(self.norm(e1), training=training)
+    def propagating(self, x, seg, pos, training=False):
+        p1 = tf.slice(self.posemb, [0, 0], [tf.shape(x)[1], -1]) if pos is None else tf.gather(self.posemb, pos)
+        return self.drop(self.norm(tf.gather(self.emb, x)+tf.gather(self.segemb, seg)+p1), training=training)
 
 
 class BERT(keras.layers.Layer):
@@ -147,8 +147,8 @@ class BERT(keras.layers.Layer):
         keras.backend.batch_set_value(zip(self.weights, [tf.train.load_variable(ckpt, i1) if self.fromtf else l1[
             i1].numpy().T if 'weight' in i1 and 'embeddings.weight' not in i1 else l1[i1].numpy() for i1 in n1]))
 
-    def propagating(self, x, seg, mask, head=False, training=False, past=None):
-        x1, x2 = self.embedding.propagating(x, seg, training=training), None
+    def propagating(self, x, seg, mask, pos=None, head=False, training=False, past=None):
+        x1, x2 = self.embedding.propagating(x, seg, pos, training=training), None
         x1 = self.projection(x1) if self.projection else x1
 
         for i1 in range(self.param['num_hidden_layers']):
