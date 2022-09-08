@@ -90,7 +90,7 @@ class BERT(keras.layers.Layer):
     def __init__(self, config, model='bert', mlm=False, fromtf=True, **kwargs):
         super(BERT, self).__init__(**kwargs)
         assert model in ['bert', 'roberta', 'albert', 'electra']
-        self.head, self.share = model if model in ['bert', 'electra'] else 'bert', (model == 'albert')
+        self.head, self.share, self.mlm = model if model in ['bert', 'electra'] else 'bert', (model == 'albert'), mlm
         self.param = json.load(open(config)) if type(config) is str else config
         self.edim = self.param.get('embedding_size', self.param['hidden_size'])
         self.act = gelu_activating if self.param['hidden_act'] == 'gelu' else self.param['hidden_act']
@@ -141,7 +141,7 @@ class BERT(keras.layers.Layer):
             '/': '.', 'layer_': 'layer.', 'kernel': 'weight', '_embeddings': '_embeddings.weight', 'output_': ''}
 
     def loading(self, ckpt):
-        _ = self.propagating(tf.ones((2, 2), tf.int32), tf.zeros((2, 2), tf.int32), tf.zeros((2, 2)))
+        _ = self.propagating(tf.ones((2, 2), tf.int32), tf.zeros((2, 2), tf.int32), tf.zeros((2, 2)), head=self.mlm)
         r1, l1 = re.compile('|'.join(map(re.escape, self.rpl))), torch.load(ckpt) if not self.fromtf else None
         n1 = [r1.sub((lambda x1: self.rpl[x1.group(0)]), i1.name[:-2]) for i1 in self.weights]
         keras.backend.batch_set_value(zip(self.weights, [tf.train.load_variable(ckpt, i1) if self.fromtf else l1[
