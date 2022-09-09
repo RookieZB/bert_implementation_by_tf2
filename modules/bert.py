@@ -1,30 +1,33 @@
 # -*- coding: utf-8 -*-
 
 """
-Implementation of BERT, ALBERT, RoBERTa, ELECTRA
+Implementation of BERT, RoBERTa, ALBERT, ELECTRA
 https://arxiv.org/abs/1810.04805
-https://arxiv.org/abs/1909.11942
 https://arxiv.org/abs/1907.11692
+https://arxiv.org/abs/1909.11942
 https://arxiv.org/abs/2003.10555
 
 """
 
 import re
 import json
-import torch
+# import torch
 import tensorflow as tf
 import tensorflow.keras as keras
 
 
 def w_initializing(param=0.02):
+    """Truncated normal initializing"""
     return keras.initializers.TruncatedNormal(stddev=param)
 
 
 def gelu_activating(x):
+    """GELU activation function"""
     return 0.5*x*(1.0+tf.math.erf(x/tf.math.sqrt(2.0)))
 
 
 class Attention(keras.layers.Layer):
+    """Attention layer"""
     def __init__(self, bname, lname, head, size, attdrop=0., drop=0., eps=1e-6, ninf=-1e4, **kwargs):
         super(Attention, self).__init__(**kwargs)
         self.head, self.size, self.dim, self.ninf = head, size, head*size, ninf
@@ -40,7 +43,8 @@ class Attention(keras.layers.Layer):
         return tf.transpose(tf.reshape(x, [-1, tf.shape(x)[1], self.head, self.size]), [0, 2, 1, 3])
 
     def masking(self, mask):
-        return tf.cast(mask[:, tf.newaxis, tf.newaxis, :], tf.float32)*self.ninf
+        return tf.cast(mask[:, tf.newaxis, tf.newaxis, :] if len(
+            tf.shape(mask)) == 2 else mask[:, tf.newaxis, :, :], tf.float32)*self.ninf
 
     def calculating(self, q, k, v, mask, training):
         a1 = tf.matmul(self.transposing(q), self.transposing(k), transpose_b=True)
@@ -59,6 +63,7 @@ class Attention(keras.layers.Layer):
 
 
 class TransEncoder(keras.layers.Layer):
+    """Transformer encoder layer"""
     def __init__(self, bname, lname, head, size, dff, attdrop=0., drop=0., act='relu', eps=1e-6, **kwargs):
         super(TransEncoder, self).__init__(**kwargs)
         self.att = Attention(bname, lname, head, size, attdrop, drop, eps)
@@ -73,6 +78,7 @@ class TransEncoder(keras.layers.Layer):
 
 
 class Embedding(keras.layers.Layer):
+    """Embedding layer"""
     def __init__(self, bname, lname, voc, dim, maxlen=512, seg=2, drop=0., eps=1e-6, **kwargs):
         super(Embedding, self).__init__(**kwargs)
         self.emb = self.add_weight(bname+lname[0], (voc, dim), None, w_initializing())
@@ -82,11 +88,13 @@ class Embedding(keras.layers.Layer):
         self.drop = keras.layers.Dropout(drop)
 
     def propagating(self, x, seg, pos, training=False):
+        e1 = tf.gather(self.emb, x)+tf.gather(self.segemb, seg)
         p1 = tf.slice(self.posemb, [0, 0], [tf.shape(x)[1], -1]) if pos is None else tf.gather(self.posemb, pos)
-        return self.drop(self.norm(tf.gather(self.emb, x)+tf.gather(self.segemb, seg)+p1), training=training)
+        return self.drop(self.norm(e1+p1), training=training)
 
 
 class BERT(keras.layers.Layer):
+    """BERT model"""
     def __init__(self, config, model='bert', mlm=False, fromtf=True, **kwargs):
         super(BERT, self).__init__(**kwargs)
         assert model in ['bert', 'roberta', 'albert', 'electra']
@@ -147,13 +155,15 @@ class BERT(keras.layers.Layer):
         keras.backend.batch_set_value(zip(self.weights, [tf.train.load_variable(ckpt, i1) if self.fromtf else l1[
             i1].numpy().T if 'weight' in i1 and 'embeddings.weight' not in i1 else l1[i1].numpy() for i1 in n1]))
 
-    def propagating(self, x, seg, mask, pos=None, head=False, training=False, past=None):
-        x1, x2 = self.embedding.propagating(x, seg, pos, training=training), None
-        x1 = self.projection(x1) if self.projection else x1
+    def propagating(self, x, seg=None, mask=None, pos=None, head=False, training=False, past=None, last=True):
+        s1, m1 = (tf.zeros_like(x) if seg is None else seg), (tf.zeros_like(x) if mask is None else mask)
+        x1 = self.embedding.propagating(x, s1, pos, training=training)
+        x1, l1 = self.projection(x1) if self.projection else x1, []
 
         for i1 in range(self.param['num_hidden_layers']):
-            x1 = self.encoder[0 if self.share else i1].propagating(x1, mask, training, past[i1] if past else None)
+            x1 = self.encoder[0 if self.share else i1].propagating(x1, m1, training, past[i1] if past else None)
+            l1 += [x1] if not last else []
 
         x2 = self.norm(self.dense(x1)) if head else None
         x2 = tf.nn.bias_add(tf.matmul(x2, self.embedding.emb, transpose_b=True), self.outbias) if head else None
-        return (x2, x1) if head else x1
+        return (x2, x1 if last else l1) if head else (x1 if last else l1)
